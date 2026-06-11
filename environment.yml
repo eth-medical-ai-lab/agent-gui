@@ -1,0 +1,9 @@
+name: agent-gui
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+# Python package deps are pinned in pyproject.toml (single source of truth).
+# After `conda activate agent-gui`, install them with:  pip install -e .

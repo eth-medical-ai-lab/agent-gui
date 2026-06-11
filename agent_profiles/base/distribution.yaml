@@ -1,0 +1,17 @@
+name: cloud
+version: 0.0.1
+description: "Autonomous coding agent"
+author: "Allen Zhao"
+license: "MIT"
+
+env_requires:
+  - name: TERMINAL_ENV # docker
+    description: "Terminal environment variables"
+    required: true
+  - name: GEMINI_API_KEY 
+    description: "Gemini API key for cloud provider"
+    required: true
+  - name: BRAVE_SEARCH_API_KEY
+    description: "Brave Search API key for web search"
+    required: false
+    default: ""

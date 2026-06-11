@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Agent GUI"
+abstract: "Pixel-art office GUI for observing and steering local AI agents running in Docker sandboxes."
+type: software
+authors:
+  - name: "ETH Zurich, Medical AI Lab"
+license: MIT
+version: "0.1.0"
+date-released: "2026-06-11"
+repository-code: "https://github.com/eth-medical-ai-lab/agent-gui"
+keywords:
+  - ai-agents
+  - agent-observability
+  - llm
+  - gui

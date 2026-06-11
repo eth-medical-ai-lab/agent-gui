@@ -1019,6 +1019,53 @@ def _patch_desk_container_identity() -> None:
     emit({"type": "log", "msg": f"[worker] docker container keyed to desk {key}"})
 
 
+def _patch_flush_watermark(agent) -> None:
+    """Fix Hermes silently never persisting turns after an interrupted/failed one.
+
+    An interrupted or API-failed turn leaves the desk db ending in a dangling
+    ``user`` row. The next turn loads it into history, appends the new user
+    message, and crash-persists it — advancing Hermes' flush watermark
+    (``_last_flushed_db_idx``) past it. Then ``repair_message_sequence`` merges
+    the two consecutive user messages IN PLACE (``messages[:] = merged``),
+    shrinking the list — but neither the watermark nor the
+    ``len(conversation_history)`` floor inside ``_flush_messages_to_session_db``
+    is adjusted. The final flush slices ``messages[watermark:]`` past the new
+    assistant reply, so the whole turn — and every later turn of a warm worker —
+    is silently never written to the db. In the GUI: the reply streams fine,
+    then vanishes from the Feed the moment the live overlay clears.
+
+    Fix: compute the already-persisted prefix by OBJECT IDENTITY instead of by
+    index. ``turn_context`` builds ``messages = list(conversation_history)``
+    (same dicts) and the in-place repair only merges/drops already-known dicts,
+    so the identity prefix stays correct through any rewrite.
+    """
+    orig = agent._flush_messages_to_session_db
+    flushed_refs: list = []   # strong refs: keeps tracked dicts alive so ids stay unique
+
+    def _patched(self, messages, conversation_history=None):
+        known = {id(m) for m in (conversation_history or [])}
+        known.update(id(m) for m in flushed_refs)
+        idx = 0
+        for m in messages:
+            if id(m) in known:
+                idx += 1
+            else:
+                break
+        self._last_flushed_db_idx = idx
+        # Pass no history: orig's len(conversation_history) floor is the stale
+        # index that breaks after the in-place repair; our identity prefix
+        # already covers everything the history accounts for.
+        orig(messages, None)
+        # orig advances the watermark only when every append succeeded; mirror
+        # that so a failed write is retried next flush instead of marked done.
+        if self._last_flushed_db_idx == len(messages):
+            flushed_refs.extend(messages[idx:])
+            if len(flushed_refs) > 4000:
+                del flushed_refs[:-4000]
+
+    agent._flush_messages_to_session_db = types.MethodType(_patched, agent)
+
+
 def _reset_docker_for_team_repo() -> None:
     """Force-remove THIS desk's Docker container when the GUI flagged a mount change.
 
@@ -1416,6 +1463,13 @@ def main() -> None:
                 _emit_log(" ".join(str(a) for a in args))
 
         agent._vprint = types.MethodType(_patched_vprint, agent)  # type: ignore[method-assign]
+
+        # Keep db persistence correct when Hermes repairs a dangling-user history
+        # in place (post-interrupt/post-error resumes) — see _patch_flush_watermark.
+        try:
+            _patch_flush_watermark(agent)
+        except Exception as exc:
+            emit({"type": "log", "msg": f"[worker] flush watermark patch skipped: {exc}"})
 
         # ── Force the Ollama context window directly on the agent ────────────────
         # Hermes normally auto-detects num_ctx by probing the base_url with

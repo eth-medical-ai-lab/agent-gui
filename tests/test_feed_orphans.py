@@ -3,12 +3,14 @@ reach Hermes' DB, so the server converts their live replay buffer into persisten
 feed events and merges them into every DB-derived activity snapshot. Without this
 the Feed visibly "sweeps away" everything the user just watched stream."""
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from agent_gui import server as srv
-from agent_gui.activity_parser import ActivityEvent
+from agent_gui.activity_parser import ActivityEvent, parse_activity
+from agent_gui.db import Message
 
 
 @pytest.fixture(autouse=True)
@@ -128,6 +130,54 @@ def test_merge_drops_orphans_already_committed_to_db():
 def test_merge_without_orphans_returns_input():
     db_events = [_ev("2026-01-01T00:00:00+00:00", "message", "hi")]
     assert srv._merge_orphan_feed(db_events, "no-such-desk") is db_events
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, tz=timezone.utc).isoformat()
+
+
+def test_prompt_stays_before_orphans_after_restart():
+    """End-to-end repro of the reported desk bug. Turn 1 was interrupted (its
+    streamed work saved as orphans, its user row committed to the DB). The server
+    restarted — wiping in-memory markers — then a 'Continue.' resume ran. With only
+    the resume turn's user_message marker left in memory, _apply_real_times must
+    not hand it to the earlier prompt; the merged feed must start with the prompt,
+    then the interrupted turn's orphans, then the resume + its work."""
+    sid = "deskR"
+    # Interrupted turn 1's preserved events (sit between the prompt and the resume).
+    srv._orphan_feed_events[sid] = [
+        srv._orphan_event(160.0, "message", "🤖", "Agent", "exploring the repo"),
+        srv._orphan_event(300.0, "message", "⏸", "Interrupted",
+                          "Turn stopped before completion."),
+    ]
+    # Post-restart markers: only the resume turn's (its user_message marker is
+    # LATER than the original prompt's DB time — the trap).
+    srv._record_event_time(sid, "user_message", 360.0)
+    srv._record_event_time(sid, "message", 362.0)
+
+    db = [
+        Message(id=1, session_id=sid, role="user", content="# the original task",
+                timestamp=_iso(100.0)),                       # prompt, turn-start time
+        Message(id=2, session_id=sid, role="user", content="Continue.",
+                timestamp=_iso(361.0)),                       # resume prompt
+        Message(id=3, session_id=sid, role="assistant",
+                content="On it — starting the task now", timestamp=_iso(999.0)),  # batch time
+    ]
+    events = parse_activity(db)
+    srv._apply_real_times(events, sid)
+    merged = srv._merge_orphan_feed(events, sid)
+
+    details = [e.detail for e in merged]
+    assert details == [
+        "# the original task",      # prompt FIRST …
+        "exploring the repo",       # … then the interrupted turn's orphans …
+        "Turn stopped before completion.",
+        "Continue.",                # … then the resume …
+        "On it — starting the task now",  # … and the resumed work.
+    ]
+    # The prompt kept its real DB turn-start time, not the resume marker.
+    prompt = merged[0]
+    assert datetime.fromisoformat(prompt.timestamp).timestamp() == pytest.approx(100.0)
 
 
 def test_worker_surfaces_swallowed_api_failure(monkeypatch):

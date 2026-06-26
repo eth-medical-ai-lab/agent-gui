@@ -138,6 +138,35 @@ function makeTeam(color: TeamColor): Team {
   return { id: `team-${Date.now()}-${Math.random().toString(36).slice(2)}`, color, scene: DEFAULT_SCENE, desks: [makePending()] };
 }
 
+// Surface teams that exist server-side (e.g. desks created via the API or a script)
+// but aren't in the browser workbench yet: for any session whose team_id is UNKNOWN
+// to the frontend, reconstruct that team so the desk shows in the office. Only teams
+// the frontend has never seen are created — known teams stay under the user's manual
+// management, so removing a desk from one doesn't make it reappear on the next poll.
+function mergeServerTeams(current: Team[], sessions: Session[]): Team[] {
+  const knownTeamIds = new Set(current.map((t) => t.id));
+  const placed = new Set(
+    current.flatMap((t) => t.desks.filter((d) => !("isPending" in d)).map((d) => d.id)),
+  );
+  const byTeam = new Map<string, Session[]>();
+  for (const s of sessions) {
+    const tid = s.team_id;
+    if (!tid || knownTeamIds.has(tid) || placed.has(s.id)) continue;
+    let arr = byTeam.get(tid);
+    if (!arr) { arr = []; byTeam.set(tid, arr); }
+    arr.push(s);
+  }
+  if (byTeam.size === 0) return current;
+  const colors: TeamColor[] = ["blue", "red", "green", "purple", "orange"];
+  let i = current.length;
+  const added: Team[] = [];
+  for (const [tid, sess] of byTeam) {
+    added.push({ id: tid, color: colors[i % colors.length], scene: DEFAULT_SCENE, desks: sess });
+    i += 1;
+  }
+  return [...current, ...added];
+}
+
 export default function App() {
   const [teams, setTeams] = useState<Team[]>([makeTeam("blue")]);
   const [pendingTexts, setPendingTexts] = useState<Record<string, string>>({});
@@ -314,7 +343,7 @@ export default function App() {
           }
 
           if (restoredTeams.length > 0) {
-            setTeams(restoredTeams);
+            setTeams(mergeServerTeams(restoredTeams, data));
             if (Object.keys(pendingTextsInit).length > 0) setPendingTexts(pendingTextsInit);
             if (Object.keys(taskContentsInit).length > 0) setTaskContents(taskContentsInit);
             if (Object.keys(taskImagesInit).length > 0) setTaskImages(taskImagesInit);
@@ -322,17 +351,24 @@ export default function App() {
             return;
           }
         }
+        // No saved workbench (or nothing restored): still surface server-side teams
+        // (e.g. script-created desks) so they appear in the office on a fresh load.
+        setTeams((prev) => mergeServerTeams(prev, data));
       } else {
-        // Normal poll: refresh session data across all teams
+        // Normal poll: refresh session data across all teams + merge in any
+        // newly-appeared server-side teams (script-created desks).
         setTeams((prev) =>
-          prev.map((t) => ({
-            ...t,
-            desks: t.desks.map((d) => {
-              if ("isPending" in d) return d;
-              const fresh = data.find((s) => s.id === d.id);
-              return fresh ?? d;
-            }),
-          }))
+          mergeServerTeams(
+            prev.map((t) => ({
+              ...t,
+              desks: t.desks.map((d) => {
+                if ("isPending" in d) return d;
+                const fresh = data.find((s) => s.id === d.id);
+                return fresh ?? d;
+              }),
+            })),
+            data,
+          )
         );
       }
       setBackendError(null);

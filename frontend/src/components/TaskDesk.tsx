@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ActivityEvent, ApiMode, DeskHistory, FileNode, FilePreviewData, LiveState, ReasoningEffort, Session, WorkerEvent } from "../types";
+import type { ActivityEvent, ApiMode, DeskHistory, FileNode, FilePreviewData, LiveState, ReasoningEffort, Session, SubagentRecord, WorkerEvent } from "../types";
 import { DESK_PANEL_Z_BASE } from "../floatingPanelStack";
 import { usePanelDrag } from "../usePanelDrag";
 import {
@@ -16,6 +16,7 @@ import { scrollContainerToBottom, scrollIntoContainer } from "../scrollContainer
 import { useTeamRowPanel } from "../TeamRowPanelContext";
 import { usePanelResize, type PanelSize } from "../usePanelResize";
 import { PanelResizeHandle } from "./PanelResizeHandle";
+import { SubagentDesk, applySubagentLive, groupSubagentsIntoRounds } from "./SubagentDesk";
 import { api } from "../api/client";
 import { ActivityFeed } from "./ActivityFeed";
 import { FileExplorer } from "./FileExplorer";
@@ -23,6 +24,7 @@ import { InspectPanel } from "./InspectPanel";
 import { ActivityOverview } from "./ActivityOverview";
 import { MarkdownView } from "./FilePreview";
 import { deskDisplayTitle } from "../taskDisplay";
+import { toolIcon } from "../toolIcons";
 
 const _TEXT_EXTS = new Set([
   "txt","md","py","js","ts","jsx","tsx","json","csv","yaml","yml",
@@ -144,10 +146,20 @@ function statusLabel(session: Session): string {
   return "idle";
 }
 
+// Actual execution span, not wall-clock since spawn: start at the first command,
+// and for an idle desk stop at its last activity (so it freezes instead of
+// counting overnight hours). A live desk keeps ticking to now.
 function elapsedLabel(session: Session): string {
-  if (!session.started_at) return "";
-  const start = new Date(session.started_at).getTime();
-  const end = session.ended_at ? new Date(session.ended_at).getTime() : Date.now();
+  const startIso = session.first_activity_at || session.started_at;
+  if (!startIso) return "";
+  const start = new Date(startIso).getTime();
+  let end: number;
+  if (session.is_running) {
+    end = Date.now();
+  } else {
+    const endIso = session.last_activity_at || session.ended_at;
+    end = endIso ? new Date(endIso).getTime() : Date.now();
+  }
   const mins = Math.round((end - start) / 60000);
   if (mins < 1) return "<1m";
   if (mins < 60) return `${mins}m`;
@@ -642,6 +654,15 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
   const [liveState, setLiveState] = useState<LiveState>({ streamText: "" });
   useEffect(() => { liveStreamRef.current = liveState.streamText; }, [liveState.streamText]);
   const [liveEvents, setLiveEvents] = useState<ActivityEvent[]>([]);
+  // delegate_task subagents, keyed by subagent_id. Append-only within a desk:
+  // seeded from the server's durable {"subagents":[…]} replay on (re)connect and
+  // updated incrementally by live {type:"subagent"} events. NOT cleared on turn
+  // boundaries / WS close, so the tabs and their I/O persist (only reset when the
+  // panel switches to a different session).
+  const [subagents, setSubagents] = useState<Record<string, SubagentRecord>>({});
+  // Which delegation rounds are expanded to reveal their subagent bubbles.
+  // Collapsed by default so a long task stays compact; click a round to expand.
+  const [expandedRounds, setExpandedRounds] = useState<Set<number>>(() => new Set());
   // User messages sent from this panel (follow-ups / barge-ins). Kept client-side
   // so they stay visible in the feed even before Hermes persists them to the DB.
   const [sentMsgs, setSentMsgs] = useState<{ text: string; ts: string }[]>([]);
@@ -713,6 +734,13 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
   // walks over immediately when streaming starts, not only after a DB commit.
   const liveNotifiedRef = useRef(false);
 
+  // If this panel slot is ever reused for a different desk, drop the previous
+  // desk's subagent bubbles so they don't carry over to an unrelated session.
+  useEffect(() => {
+    setSubagents({});
+    setExpandedRounds(new Set());
+  }, [session.id]);
+
   useEffect(() => {
     const now = () => new Date().toISOString();
 
@@ -729,11 +757,16 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
     // streamed trace as a collapsible "Reasoning" step instead of dropping it.
     // The DB-backed step (from reasoning_content) replaces this on the next
     // activity refresh; both render identically so the swap is seamless.
+    // Trim-gate to mirror the DB path (activity_parser strips reasoning_content):
+    // qwen3-style models emit an empty `<think>\n\n</think>` on most tool-calling
+    // turns, which the parser drops — without the same .trim() here, every such
+    // turn left a clickable "Reasoning" step whose trace was blank when expanded.
     function flushThinking(prev: LiveState): void {
-      if (prev.thinkingText) {
+      const trace = prev.thinkingText?.trim();
+      if (trace) {
         setLiveEvents((le) => [...le, {
           timestamp: now(), event_type: "thinking_start", icon: "💭", title: "Reasoning",
-          detail: prev.thinkingText!, tool_name: "", is_error: false, files_touched: [],
+          detail: trace, tool_name: "", is_error: false, files_touched: [],
         }]);
       }
     }
@@ -770,12 +803,21 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
         setLiveState((prev) => {
           flushThinking(prev);     // preserve reasoning that preceded this tool call
           flushStreamed(prev);
+          // Commit a "calling <tool>" row so the in-progress call has a persistent
+          // feed entry (mirrors the DB tool_call event + per-tool icon). The live
+          // overlay below is transient and clears on tool_done; this row survives
+          // and is replaced 1:1 by the parsed row when the DB snapshot catches up.
+          setLiveEvents((le) => [...le, {
+            timestamp: now(), event_type: "tool_call", icon: toolIcon(evt.name),
+            title: `calling ${evt.name ?? "tool"}`, detail: "",
+            tool_name: evt.name ?? "", is_error: false, files_touched: [],
+          }]);
           return { streamText: "", toolName: evt.name, logLine: undefined, thinkingText: undefined,
                    statusLine: `Invoking ${evt.name ?? "tool"}` };
         });
       } else if (evt.type === "tool_done") {
         setLiveEvents((le) => [...le, {
-          timestamp: now(), event_type: "tool_result", icon: "🔧",
+          timestamp: now(), event_type: "tool_result", icon: toolIcon(evt.name),
           title: `${evt.name ?? "tool"} done`,
           detail: (evt.result ?? "").slice(0, 200),
           tool_name: evt.name ?? "", is_error: false, files_touched: [],
@@ -810,6 +852,11 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
           timestamp: now(), event_type: "message", icon: "🚶", title: "Agent arrived",
           detail: "", tool_name: "", is_error: false, files_touched: [],
         }]);
+      } else if (evt.type === "subagent") {
+        // A delegate_task child: route into its own persistent tab instead of the
+        // parent's feed, so its trace survives the turn (see `subagents` state).
+        notifyActivityOnce();
+        setSubagents((prev) => applySubagentLive(prev, evt));
       }
     }
 
@@ -827,9 +874,20 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
       },
       onLive,
       () => {
-        // WS closed (session ended, interrupted, or server restarted) — clear stale live overlay
+        // WS closed (session ended, interrupted, or server restarted) — clear stale live overlay.
+        // NOTE: subagent tabs are intentionally NOT cleared here; the server's
+        // durable replay re-seeds them on reconnect and they must persist.
         setLiveState({ streamText: "" });
         setLiveEvents([]);
+      },
+      (records) => {
+        // Durable subagent replay sent once on (re)connect — seed/merge the tab
+        // state. Records are authoritative (full timeline), so they win per id.
+        setSubagents((prev) => {
+          const next = { ...prev };
+          for (const r of records) if (r && r.subagent_id) next[r.subagent_id] = r;
+          return next;
+        });
       },
     );
     wsRef.current = ws;
@@ -1194,6 +1252,21 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
     }
     onPanelActivate?.();
     onOpen?.();
+    requestAnimationFrame(scrollPanelIntoView);
+  }
+
+  // The panel is anchored below the desk in viewport space, so for a desk on the
+  // bottom team row it opens below the fold. Nudge the floor down just enough to
+  // reveal the panel's bottom (the floor reserves slack below the last row for this).
+  function scrollPanelIntoView() {
+    const desk = deskRef.current;
+    if (!desk) return;
+    const scroller = desk.closest("[data-floor-scroll]") as HTMLElement | null;
+    if (!scroller) return;
+    const panelH = Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_PREF_HEIGHT, teamRowHeight));
+    const panelBottom = desk.getBoundingClientRect().bottom + 10 + panelH; // 10 = gap below desk
+    const overflow = panelBottom - scroller.getBoundingClientRect().bottom;
+    if (overflow > 0) scroller.scrollBy({ top: overflow + 16, behavior: "smooth" });
   }
 
   function handleClick() {
@@ -1209,14 +1282,14 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
     }, 220);
   }
 
-  async function handleDeskDoubleClick(e: React.MouseEvent) {
+  function handleDeskDoubleClick(e: React.MouseEvent) {
     e.stopPropagation();
+    // Swallow the double-click: cancel the pending single-click so the desk's
+    // open/closed state is left unchanged. Double-click never maximizes.
     if (deskClickTimerRef.current) {
       clearTimeout(deskClickTimerRef.current);
       deskClickTimerRef.current = null;
     }
-    if (!expanded) await openPanel();
-    setIsMaximized(true);
   }
 
   function toggleMaximized() {
@@ -1227,6 +1300,10 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
   const deskColor = deskColors[index % deskColors.length];
   const deskTitle = deskDisplayTitle(session.title, session.title_summary, taskContent);
 
+  // Spawned subagents grouped into delegation rounds (each renders as its own
+  // desk: bubble → expandable panel) shown beside the parent desk.
+  const subagentRounds = groupSubagentsIntoRounds(Object.values(subagents));
+  const subagentCount = subagentRounds.reduce((n, r) => n + r.length, 0);
   const tabItems: { id: DeskTab; label: string }[] = [
     { id: "activity", label: "⚡ Activity" },
     { id: "tasks",    label: "📋 Tasks" },
@@ -1312,7 +1389,9 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
       }}
       onMouseDown={(e) => { e.stopPropagation(); onPanelActivate?.(); }}
       onClick={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => { e.stopPropagation(); toggleMaximized(); }}
+      // Don't maximize on double-click inside the panel body (e.g. selecting a word
+      // in the activity feed). Maximize stays on the tab-bar/header and the ⊞ button.
+      onDoubleClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === "f") {
           e.preventDefault();
@@ -1702,6 +1781,58 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
           title="Delete desk (removes session data)"
         >×</button>
 
+        {/* Spawned subagents — each its own desk (bubble → expandable panel),
+            grouped by delegation round in the gap to the right of this desk. */}
+        {subagentCount > 0 && (
+          <div style={{
+            position: "absolute", left: "100%", top: 0, marginLeft: 10, zIndex: 5,
+            display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-start",
+            maxWidth: 168,
+          }}>
+            {subagentRounds.map((round, ri) => {
+              const open = expandedRounds.has(ri);
+              const anyRunning = round.some(({ rec }) => rec.status === "running");
+              return (
+              <div key={ri} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpandedRounds((prev) => {
+                      const next = new Set(prev);
+                      next.has(ri) ? next.delete(ri) : next.add(ri);
+                      return next;
+                    });
+                  }}
+                  title={open ? "Collapse round" : "Expand round"}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+                    fontSize: 9, textTransform: "uppercase", letterSpacing: 0.5,
+                    color: "var(--text-dim)", fontWeight: 600, whiteSpace: "nowrap",
+                  }}
+                >
+                  <span style={{ display: "inline-block", width: 7 }}>{open ? "▾" : "▸"}</span>
+                  {subagentRounds.length > 1 ? `Round ${ri + 1}` : "Subagents"}
+                  <span style={{ opacity: 0.8 }}>· {round.length}</span>
+                  {anyRunning && (
+                    <span style={{
+                      width: 6, height: 6, borderRadius: "50%",
+                      background: "var(--red)", marginLeft: 2,
+                    }} />
+                  )}
+                </button>
+                {open && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-start" }}>
+                    {round.map(({ rec, index }) => (
+                      <SubagentDesk key={rec.subagent_id} rec={rec} index={index} />
+                    ))}
+                  </div>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        )}
+
         {/* Clickable desk body */}
         <div
           style={{
@@ -1719,7 +1850,7 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
           }}
           onClick={handleClick}
           onDoubleClick={handleDeskDoubleClick}
-          title={expanded ? "Double-click to maximize panel" : "Click to open · double-click to open maximized"}
+          title={expanded ? "Click to close" : "Click to open"}
         >
           {/* Monitor */}
           <div style={{

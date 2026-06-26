@@ -1017,7 +1017,7 @@ async def test_failed_adjudication_caches_nothing(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
     monkeypatch.setattr(srv, "_audit_state", lambda s, w: ("h2", "tell a joke", [], 1))
-    monkeypatch.setattr(srv, "_aux_model_config", lambda: ("http://test", "m"))
+    monkeypatch.setattr(srv, "_aux_model_config", lambda *a, **k: ("http://test", "m"))
     monkeypatch.setattr(srv, "hermes_model_config", lambda home: ("http://test", "m"))
 
     calls = {"n": 0}
@@ -1050,7 +1050,7 @@ async def test_fresh_audit_skipped_when_running_unless_forced(tmp_path, monkeypa
     (ws / "TASK.md").write_text("# Task\n\ndo the thing\n", encoding="utf-8")
     srv._running_procs[sid] = object()
     srv._session_audits.pop(sid, None)
-    monkeypatch.setattr(srv, "_aux_model_config", lambda: ("http://test", "m"))
+    monkeypatch.setattr(srv, "_aux_model_config", lambda *a, **k: ("http://test", "m"))
 
     async def boom(*a, **k):
         raise AssertionError("fresh audit LLM should not run")
@@ -1062,6 +1062,124 @@ async def test_fresh_audit_skipped_when_running_unless_forced(tmp_path, monkeypa
         assert out["should_intervene"] is False
     finally:
         srv._running_procs.pop(sid, None)
+
+
+# ── Manager aux transport (anthropic `claude` profile vs OpenAI-compat) ──────
+
+
+@pytest.mark.asyncio
+async def test_ollama_aux_chat_routes_anthropic_profile_to_messages_api(monkeypatch):
+    """A selected `claude` (anthropic) manager profile must use the Anthropic
+    Messages transport, never OpenAI /chat/completions (api.anthropic.com → 404)."""
+    monkeypatch.setattr(srv, "_MGR_PROVIDER", "anthropic")
+
+    async def fake_anthropic(base_url, model, prompt, max_tokens):
+        return "ANTHROPIC"
+
+    async def fake_openai(*a, **k):
+        raise AssertionError("anthropic profile must not use the OpenAI path")
+
+    monkeypatch.setattr(srv, "_anthropic_aux_chat", fake_anthropic)
+    monkeypatch.setattr(srv, "_openai_aux_chat", fake_openai)
+
+    out = await srv._ollama_aux_chat("https://api.anthropic.com", "claude-opus-4-8", "hi", 30)
+    assert out == "ANTHROPIC"
+
+
+@pytest.mark.asyncio
+async def test_ollama_aux_chat_non_anthropic_uses_openai_path(monkeypatch):
+    """Default / vLLM backends keep the OpenAI-compat transport."""
+    monkeypatch.setattr(srv, "_MGR_PROVIDER", "")  # no anthropic profile selected
+
+    async def fake_anthropic(*a, **k):
+        raise AssertionError("non-anthropic backend must not use the Messages path")
+
+    async def fake_openai(base_url, model, prompt, max_tokens):
+        return "OPENAI"
+
+    async def passthrough(base_url, model):
+        return model
+
+    monkeypatch.setattr(srv, "_anthropic_aux_chat", fake_anthropic)
+    monkeypatch.setattr(srv, "_openai_aux_chat", fake_openai)
+    monkeypatch.setattr(srv, "_fallback_ollama_model", passthrough)
+
+    out = await srv._ollama_aux_chat("http://127.0.0.1:8111/v1", "Qwen/Qwen3.5-27B", "hi", 30)
+    assert out == "OPENAI"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_aux_chat_builds_messages_request(monkeypatch):
+    """POSTs /v1/messages with x-api-key + anthropic-version (no Bearer), and
+    concatenates the response's text blocks. base_url's trailing /v1 is tolerated."""
+    monkeypatch.setattr(srv, "_MGR_API_KEY", "sk-ant-test")
+    captured: dict = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"content": [{"type": "text", "text": "Tic Tac Toe"},
+                                 {"type": "text", "text": " CLI"}]}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr(srv.httpx, "AsyncClient", FakeClient)
+
+    out = await srv._anthropic_aux_chat("https://api.anthropic.com", "claude-opus-4-8", "title please", 30)
+    assert out == "Tic Tac Toe CLI"
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["headers"]["x-api-key"] == "sk-ant-test"
+    assert captured["headers"]["anthropic-version"]
+    assert "Authorization" not in captured["headers"]
+    assert captured["json"]["model"] == "claude-opus-4-8"
+    assert captured["json"]["messages"][0]["content"] == "title please"
+
+    # A base_url that already carries /v1 must not become /v1/v1/messages.
+    await srv._anthropic_aux_chat("https://api.anthropic.com/v1/", "m", "x", 30)
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+
+
+def test_aux_model_config_uses_selected_profile_verbatim(monkeypatch):
+    """A selected manager profile's (base_url, model) are returned as-is for every
+    manager call — no separate 'aux' model, no override leaking the default model."""
+    monkeypatch.setattr(srv, "_MGR_BASE_URL", "http://127.0.0.1:8111/v1")
+    monkeypatch.setattr(srv, "_MGR_MODEL", "Qwen/Qwen3.5-27B")
+    monkeypatch.setattr(srv, "_EFFECTIVE_MODEL", "claude-opus-4-8")  # must NOT leak in
+    assert srv._aux_model_config() == ("http://127.0.0.1:8111/v1", "Qwen/Qwen3.5-27B")
+
+
+def test_aux_model_config_default_uses_effective_model(monkeypatch):
+    """No profile selected → the configured default backend + the effective model
+    (the same model agents run on), never a small 'aux' model."""
+    monkeypatch.setattr(srv, "_MGR_BASE_URL", "")
+    monkeypatch.setattr(srv, "_MGR_MODEL", "")
+    monkeypatch.setattr(srv, "_EFFECTIVE_MODEL", "Qwen/Qwen3.5-27B")
+    monkeypatch.setattr(srv, "hermes_model_config", lambda home: ("http://default/v1", "cfg-model"))
+    assert srv._aux_model_config() == ("http://default/v1", "Qwen/Qwen3.5-27B")
+
+
+@pytest.mark.asyncio
+async def test_set_manager_profile_rejects_claude_sdk(client: AsyncClient):
+    """The Claude Agent SDK isn't an LLM endpoint (it resolves models itself), so
+    it can't run the manager — every reserved SDK id is rejected, not silently set."""
+    for sdk_id in ("claude-sdk", "claude-agent-sdk", "claude-code"):
+        r = await client.post("/api/manager/profile", json={"profile": sdk_id})
+        assert r.status_code == 400, sdk_id
 
 
 # ── Real per-event timestamps (overlay vs. coarse flush time) ────────────────
@@ -1124,12 +1242,15 @@ def test_record_worker_evt_time_token_runs_and_tools():
     sid = "ts-runs"
     try:
         state: dict = {}
-        # token run → one 'message'; tool boundary; another token run → another 'message'.
-        srv._record_worker_evt_time(sid, {"type": "token", "text": "he", "ts": 1.0}, state)
-        srv._record_worker_evt_time(sid, {"type": "token", "text": "llo", "ts": 1.1}, state)
+        # token run → one 'message'; tool boundary; another token run → another
+        # 'message'. Text must clear MIN_MESSAGE_LEN to match parse_activity, which
+        # only emits a message event for substantive content (a tiny run would be a
+        # surplus marker — see test_realtime_markers).
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "Hello there", "ts": 1.0}, state)
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "!", "ts": 1.1}, state)
         srv._record_worker_evt_time(sid, {"type": "tool_start", "name": "bash", "ts": 2.0}, state)
         srv._record_worker_evt_time(sid, {"type": "tool_done", "name": "bash", "ts": 3.0}, state)
-        srv._record_worker_evt_time(sid, {"type": "token", "text": "done", "ts": 4.0}, state)
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "All finished now", "ts": 4.0}, state)
         kinds = [k for k, _ts, _n in srv._session_event_times[sid]]
         assert kinds == ["message", "tool_call", "tool_result", "message"]
     finally:
@@ -1146,17 +1267,44 @@ def test_record_worker_evt_time_records_thinking_runs():
         # think run → reasoning step; tokens (response); tool; think run again.
         srv._record_worker_evt_time(sid, {"type": "thinking", "text": "hm", "ts": 1.0}, state)
         srv._record_worker_evt_time(sid, {"type": "thinking", "text": "mm", "ts": 1.1}, state)
-        srv._record_worker_evt_time(sid, {"type": "token", "text": "ok", "ts": 2.0}, state)
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "okay then", "ts": 2.0}, state)
         srv._record_worker_evt_time(sid, {"type": "tool_start", "name": "bash", "ts": 3.0}, state)
         srv._record_worker_evt_time(sid, {"type": "tool_done", "name": "bash", "ts": 4.0}, state)
         srv._record_worker_evt_time(sid, {"type": "thinking", "text": "next", "ts": 5.0}, state)
-        srv._record_worker_evt_time(sid, {"type": "token", "text": "done", "ts": 6.0}, state)
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "all done now", "ts": 6.0}, state)
         recorded = srv._session_event_times[sid]
         kinds = [k for k, _ts, _n in recorded]
         # One marker per run; thinking_start recorded at the run's FIRST event.
         assert kinds == ["thinking_start", "message", "tool_call", "tool_result",
                          "thinking_start", "message"]
         assert recorded[0][1] == 1.0 and recorded[4][1] == 5.0
+    finally:
+        srv._session_event_times.pop(sid, None)
+
+
+def test_record_worker_evt_time_skips_whitespace_only_thinking():
+    """Whitespace-only reasoning (qwen3-style empty <think>\\n\\n</think>) must NOT
+    record a thinking_start marker. parse_activity drops it from the feed (its
+    `.strip()` gate), so a marker for it would make thinking_start markers
+    outnumber the feed's reasoning events — and _apply_real_times (FIFO per kind)
+    would then hand each real reasoning step an *earlier* run's time, so every
+    trace after the first showed a stuck, too-early timestamp."""
+    sid = "ts-think-ws"
+    try:
+        state: dict = {}
+        # Run 1: substantive reasoning → one marker at its first token.
+        srv._record_worker_evt_time(sid, {"type": "thinking", "text": "real", "ts": 1.0}, state)
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "a", "ts": 2.0}, state)
+        # Run 2: whitespace-only reasoning → NO marker (dropped from the feed).
+        srv._record_worker_evt_time(sid, {"type": "thinking", "text": "\n\n", "ts": 3.0}, state)
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "b", "ts": 4.0}, state)
+        # Run 3: leading blank delta then content → marker at the CONTENT's time.
+        srv._record_worker_evt_time(sid, {"type": "thinking", "text": " ", "ts": 5.0}, state)
+        srv._record_worker_evt_time(sid, {"type": "thinking", "text": "more", "ts": 5.1}, state)
+        srv._record_worker_evt_time(sid, {"type": "token", "text": "c", "ts": 6.0}, state)
+        think = [(k, t) for k, t, _n in srv._session_event_times[sid] if k == "thinking_start"]
+        # Exactly two reasoning markers (runs 1 and 3); the whitespace run is skipped.
+        assert think == [("thinking_start", 1.0), ("thinking_start", 5.1)]
     finally:
         srv._session_event_times.pop(sid, None)
 
@@ -1799,4 +1947,116 @@ async def test_model_reasoning_qwen_guictx_alias(tmp_home: Path, tmp_path: Path,
         {"value": "none", "label": "off"},
         {"value": "medium", "label": "on"},
     ]
+
+
+# ── Claude model selection (opus/sonnet/haiku) ──────────────────────────────────
+# The Claude Code agent isn't an HTTP backend, so /api/llm/models must serve its
+# alias list (otherwise the desk picker shows only the current model), and a model
+# change on an existing Claude desk must land in .claude_model (the worker reads
+# that, not .hermes_model) without 404ing on the DB-free desk.
+
+
+@pytest.mark.asyncio
+async def test_llm_models_lists_claude_aliases_by_agent_id(client: AsyncClient):
+    r = await client.get("/api/llm/models", params={"agent_id": "claude-sdk"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["models"] == ["sonnet", "opus", "haiku"]
+    assert "opus" in body["models"]
+
+
+@pytest.mark.asyncio
+async def test_llm_models_lists_claude_aliases_by_base_url(client: AsyncClient):
+    # The desk model picker sends the Claude card's base_url ("claude-agent-sdk").
+    r = await client.get("/api/llm/models", params={"base_url": "claude-agent-sdk"})
+    assert r.status_code == 200
+    assert "opus" in r.json()["models"]
+
+
+@pytest.mark.asyncio
+async def test_patch_claude_desk_model_writes_claude_marker(client: AsyncClient, tmp_path: Path):
+    # A DB-free Claude desk: stand up its sandbox + agent marker directly (no worker).
+    sid = "20260101_120000_clauded"
+    ws = tmp_path / "claude_ws"
+    ws.mkdir()
+    (ws / ".hermes_profile").write_text("claude-sdk", encoding="utf-8")
+    srv._session_workspaces[sid] = str(ws)
+    try:
+        r = await client.patch(f"/api/sessions/{sid}/desk-config", json={"model": "opus"})
+        assert r.status_code == 200                    # DB-free Claude stub, not a 404
+        assert "opus" in json.dumps(r.json())          # model surfaced in the desk view
+        assert (ws / ".claude_model").read_text() == "opus"   # the Claude worker reads THIS
+        assert not (ws / ".hermes_model").exists()            # NOT the Hermes marker
+    finally:
+        srv._session_workspaces.pop(sid, None)
+        srv._session_autocontinue.pop(sid, None)
+
+
+@pytest.mark.asyncio
+async def test_patch_claude_desk_rejects_non_claude_model(client: AsyncClient, tmp_path: Path):
+    # A bogus/Ollama model id must be dropped (not written) so the SDK doesn't 400.
+    sid = "20260101_120000_claude2"
+    ws = tmp_path / "claude_ws2"
+    ws.mkdir()
+    (ws / ".hermes_profile").write_text("claude-sdk", encoding="utf-8")
+    srv._session_workspaces[sid] = str(ws)
+    try:
+        r = await client.patch(f"/api/sessions/{sid}/desk-config",
+                               json={"model": "qwen3.5:4b"})
+        assert r.status_code == 200
+        assert not (ws / ".claude_model").exists()     # invalid alias → not pinned
+    finally:
+        srv._session_workspaces.pop(sid, None)
+        srv._session_autocontinue.pop(sid, None)
+
+
+@pytest.mark.asyncio
+async def test_new_claude_desk_worker_env_is_oauth_only(tmp_home: Path, tmp_path: Path, monkeypatch):
+    """End-to-end: a new Claude SDK desk's worker must be spawned with NO
+    ANTHROPIC_API_KEY (or other outranking cred) in its env, so a stale key in the
+    server's environment can't shadow the `claude /login` subscription. Unrelated
+    inherited vars must still pass through."""
+    # Creds that would shadow OAuth if they leaked into the worker.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale-DO-NOT-LEAK")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "gw-DO-NOT-LEAK")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    # A normal inherited var that MUST survive (proves the env wasn't wiped wholesale).
+    monkeypatch.setenv("AGENT_GUI_OAUTH_TEST_SENTINEL", "keep-me")
+
+    # Claude desks are gated behind --experimental.
+    ws_root = tmp_path / "ws_claude_oauth"
+    ws_root.mkdir()
+    app = create_app(hermes_home=str(tmp_home), workspace_root=str(ws_root), experimental=True)
+
+    captured: dict = {}
+
+    def _capture(*args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env", {})
+        return _make_persistent_proc()
+
+    sid = None
+    try:
+        with mock.patch("asyncio.create_subprocess_exec", side_effect=_capture):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as cl:
+                r = await cl.post("/api/sessions/new",
+                                  json={"content": "hello", "agent": "claude-sdk", "model": "opus"})
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+
+        env = captured["env"]
+        # The Claude worker was spawned (not the Hermes worker)...
+        assert captured["args"][1].endswith("claude_worker.py")
+        assert env.get("HERMES_GUI_AGENT_KIND") == "claude"   # the Claude branch ran
+        # ...with NONE of the outranking credentials.
+        for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK"):
+            assert k not in env, f"{k} leaked into the Claude worker env"
+        # ...but unrelated inherited env still passed through.
+        assert env.get("AGENT_GUI_OAUTH_TEST_SENTINEL") == "keep-me"
+    finally:
+        if sid is not None:
+            for m in (srv._persistent_procs, srv._running_procs, srv._live_queues,
+                      srv._turn_done_events, srv._session_workspaces,
+                      srv._session_docker_vols, srv._session_worker_opts):
+                m.pop(sid, None)
 

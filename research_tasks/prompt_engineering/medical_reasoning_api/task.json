@@ -1,0 +1,36 @@
+{
+  "id": "medical_reasoning",
+  "name": "Medical Reasoning (MedXpertQA)",
+  "description": "Prompt-engineer a fixed Claude model to answer fixed, seeded MedXpertQA multiple-choice questions. Iterate on the train split (rich per-question log); report once on the disjoint held-out test split (aggregate-only).",
+  "objective": "Maximize held-out test accuracy by editing only the system prompt, tuning exclusively against the train split.",
+  "dataset": {
+    "source": "TsinghuaC3I/MedXpertQA",
+    "config": "Text",
+    "split": "test",
+    "subsample": "single seed=42 draw of 40 distinct items, partitioned into disjoint train/test of 20 each",
+    "splits": {
+      "train": {"file": "train.jsonl", "n": 20, "use": "prompt iteration"},
+      "test": {"file": "test.jsonl", "n": 20, "use": "final report (one-shot, held-out)"}
+    }
+  },
+  "model": "claude-opus-4-8",
+  "metric": "accuracy",
+  "input": "system_prompt",
+  "entrypoint": {
+    "module": "eval.py",
+    "function": "evaluate",
+    "signature": "evaluate(prompt: str, *, split: str = 'train') -> dict",
+    "cli": "python eval.py --prompt-file <file>"
+  },
+  "submit": {
+    "module": "submit.py",
+    "cli": "python submit.py --prompt-file <file>",
+    "split": "test",
+    "one_shot": true,
+    "lock_file": "submission.json",
+    "output": "aggregate-only (no per-sample log)"
+  },
+  "baseline_prompt": "baseline_prompt.txt",
+  "requirements": "requirements.txt",
+  "env": ["ANTHROPIC_API_KEY"]
+}

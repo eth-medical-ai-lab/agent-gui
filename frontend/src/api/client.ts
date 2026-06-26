@@ -1,4 +1,4 @@
-import type { ActivityEvent, AgentCapabilities, AgentPersona, AgentProfile, AgentPrototype, AuditResult, DeskExport, DeskHistory, FileNode, FilePreviewData, LlmProvider, Session, TodoData, WorkerEvent } from "../types";
+import type { ActivityEvent, AgentCapabilities, AgentPersona, AgentProfile, AgentPrototype, AuditResult, DeskExport, DeskHistory, FileNode, FilePreviewData, LlmProvider, Session, SubagentRecord, TodoData, WorkerEvent } from "../types";
 
 const BASE = "/api";
 const WS_BASE = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
@@ -223,6 +223,7 @@ export const api = {
       onEvents: (events: ActivityEvent[]) => void,
       onLive?: (evt: WorkerEvent) => void,
       onClose?: () => void,
+      onSubagents?: (records: SubagentRecord[]) => void,
     ): WebSocket => {
       const ws = new WebSocket(`${WS_BASE}/ws/activity/${id}`);
       ws.onmessage = (e) => {
@@ -230,6 +231,8 @@ export const api = {
           const data = JSON.parse(e.data);
           if (Array.isArray(data)) {
             onEvents(data);
+          } else if (data.subagents && onSubagents) {
+            onSubagents(data.subagents as SubagentRecord[]);
           } else if (data.live && onLive) {
             onLive(data.live as WorkerEvent);
           }

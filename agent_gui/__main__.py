@@ -61,6 +61,7 @@ def _serve(args) -> None:
         workspace_root=args.workspace_root,
         allowed_origins=allowed_origins,
         gui_config=gui_config,
+        experimental=args.experimental,
     )
     if not args.no_open:
         def _open() -> None:
@@ -68,6 +69,8 @@ def _serve(args) -> None:
             webbrowser.open(f"http://localhost:{args.port}")
         threading.Thread(target=_open, daemon=True).start()
     print(f"Agent GUI running at http://localhost:{args.port}  (Ctrl+C to stop)")
+    if args.experimental:
+        print("🧪 Experimental features ON — the Claude Code SDK agent is available in the roster.")
     if args.host not in ("127.0.0.1", "localhost"):
         print(f"⚠  Binding to {args.host}: the GUI is reachable from other machines "
               f"and has no authentication. Only do this on a trusted network.")
@@ -105,6 +108,10 @@ def main():
     parser.add_argument("--hermes-api", type=str, default="http://localhost:9119", help="Hermes API base URL")
     parser.add_argument("--workspace-root", type=str, default=None, help="Root dir for task workspaces (default: ~/workspace)")
     parser.add_argument("--no-open", action="store_true", help="Don't open browser automatically")
+    parser.add_argument("--experimental", action="store_true",
+                        help="Enable experimental/developmental features (currently the Claude "
+                             "Code SDK agent). Off by default; the released app exposes only the "
+                             "stable Hermes agents.")
     args = parser.parse_args()
 
     # If a server is already listening on the port, don't start a second one —

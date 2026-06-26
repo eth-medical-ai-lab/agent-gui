@@ -8,6 +8,7 @@ endpoints.
 """
 import io
 import json
+import os
 import shutil
 import sqlite3
 import tarfile
@@ -352,3 +353,90 @@ def test_import_rejects_archive_without_manifest(tmp_path):
         files={"file": ("bad.tar.gz", buf.read(), "application/gzip")},
     )
     assert r.status_code == 400
+
+
+# ── Team files travel with the desk archive ──────────────────────────────────────
+
+def _link_team_files(home: Path, ws: Path, team_id: str) -> Path:
+    """Mirror _prepare_team_files_mount: workspace/team_files → relative symlink
+    to gui_team_repos/<team_id>/. Returns the repo dir."""
+    repo = home / "gui_team_repos" / team_id
+    repo.mkdir(parents=True, exist_ok=True)
+    dest = ws / "team_files"
+    if dest.is_symlink() or dest.exists():
+        dest.unlink()
+    dest.symlink_to(os.path.relpath(repo.resolve(), ws.resolve()))
+    return repo
+
+
+def test_archive_bundles_team_files_and_import_keeps_them_in_workspace(tmp_path):
+    """Saving a desk follows its team_files symlink and bundles the real files;
+    loading leaves them as a plain workspace/team_files/ folder the desk owns
+    (detached from the shared team repo) so a resumed desk sees them directly."""
+    home = tmp_path / "hermes"
+    _make_desk_db(home, ROOT, ROWS)
+    ws = _sandbox_ws(home, ROOT, profile="coder", model="modelB")
+    (ws / ".hermes_team_id").write_text("team-x", encoding="utf-8")
+    repo = _link_team_files(home, ws, "team-x")
+    (repo / "shared.csv").write_text("x=1\n", encoding="utf-8")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "readme.txt").write_text("hi\n", encoding="utf-8")
+
+    ws_root = tmp_path / "workspaces"
+    ws_root.mkdir()
+    client = TestClient(create_app(hermes_home=str(home), workspace_root=str(ws_root)))
+
+    archive = client.get(f"/api/sessions/{ROOT}/archive").content
+    tf = "sandbox/docker/default/workspace/team_files"
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        # The team files ride along as REAL files (symlink dereferenced), and the
+        # symlink itself is not stored — team_files is a directory in the archive.
+        assert f"{tf}/shared.csv" in tar.getnames()
+        assert f"{tf}/docs/readme.txt" in tar.getnames()
+        assert tar.getmember(tf).isdir()
+        assert tar.getmember(f"{tf}/shared.csv").isfile()
+
+    # Wipe both the desk and the shared repo, then load the archive back.
+    shutil.rmtree(home / "gui_sandboxes" / ROOT)
+    shutil.rmtree(home / "gui_team_repos" / "team-x")
+
+    r = client.post(
+        "/api/sessions/import",
+        files={"file": ("desk.tar.gz", archive, "application/gzip")},
+    )
+    assert r.status_code == 200, r.text
+    # Loaded detached: no team association (so the empty-repo bind-mount can't
+    # shadow the files), and no shared repo recreated.
+    assert r.json()["team_id"] is None
+
+    loaded_ws = home / "gui_sandboxes" / ROOT / "docker" / "default" / "workspace"
+    mount = loaded_ws / "team_files"
+    assert mount.is_dir() and not mount.is_symlink()       # plain folder, owned by the desk
+    assert (mount / "shared.csv").read_text(encoding="utf-8") == "x=1\n"
+    assert (mount / "docs" / "readme.txt").read_text(encoding="utf-8") == "hi\n"
+    assert not (loaded_ws / ".hermes_team_id").exists()    # detached from team
+    assert not (home / "gui_team_repos" / "team-x").exists()  # no shared repo touched
+
+
+def test_archive_without_team_files_keeps_team_membership(tmp_path):
+    """A desk whose team has no files (no team_files content) still archives and
+    imports as a normal team desk — only bundled files trigger detachment."""
+    home = tmp_path / "hermes"
+    _make_desk_db(home, ROOT, ROWS)
+    ws = _sandbox_ws(home, ROOT, profile="coder")
+    (ws / ".hermes_team_id").write_text("team-x", encoding="utf-8")
+
+    ws_root = tmp_path / "workspaces"
+    ws_root.mkdir()
+    client = TestClient(create_app(hermes_home=str(home), workspace_root=str(ws_root)))
+    archive = client.get(f"/api/sessions/{ROOT}/archive").content
+    shutil.rmtree(home / "gui_sandboxes" / ROOT)
+
+    r = client.post(
+        "/api/sessions/import",
+        files={"file": ("desk.tar.gz", archive, "application/gzip")},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["team_id"] == "team-x"
+    loaded_ws = home / "gui_sandboxes" / ROOT / "docker" / "default" / "workspace"
+    assert (loaded_ws / ".hermes_team_id").read_text(encoding="utf-8") == "team-x"

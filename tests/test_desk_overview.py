@@ -1,11 +1,13 @@
 """Workspace-scoped overview merges related session ids."""
+import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from starlette.testclient import TestClient
 
 from agent_gui.db import HermesDB, WORKSPACE_KEY_MARKER
-from agent_gui.server import create_app
+from agent_gui.server import create_app, _ORPHAN_FEED_MARKER
 
 
 def _make_desk_db(path: Path, sid: str, user_text: str, ts: float) -> None:
@@ -261,3 +263,44 @@ def test_overview_endpoint_merges_all_runs_in_one_desk_db(tmp_path):
     assert len(data["events"]) == 2
     details = {e["detail"] for e in data["events"]}
     assert details == {"first task", "second task"}
+
+
+def _orphan(ts: float, event_type: str, title: str, detail: str,
+            tool_name: str = "", is_error: bool = False) -> dict:
+    return {
+        "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+        "event_type": event_type, "icon": "🔧", "title": title, "detail": detail,
+        "tool_name": tool_name, "is_error": is_error, "files_touched": [],
+        "time_exact": True,
+    }
+
+
+def test_overview_includes_interrupted_turn_orphans(tmp_path):
+    """A turn stopped half-way never reaches Hermes' state.db — its partial work is
+    kept in the per-desk orphan feed. The Overview must fold it in (like the Feed),
+    so an interrupted run isn't a blank gap on the chart."""
+    home = tmp_path / "hermes"
+    sid = "interrupted-desk"
+    ws = _sandbox_ws(home, sid)  # gui_sandboxes/<sid>/docker/default/workspace
+    # The user row commits at turn-start; the agent half is interrupted (not flushed).
+    _make_desk_db(home / "gui_sandboxes" / sid / "state.db", sid, "build it", 1000.0)
+    orphans = [
+        _orphan(1100.0, "tool_call", "calling bash", "make", tool_name="bash"),
+        _orphan(1120.0, "message", "Agent", "partial reply before the stop"),
+        _orphan(1130.0, "message", "Interrupted", "Turn stopped before completion."),
+    ]
+    (ws / _ORPHAN_FEED_MARKER).write_text(json.dumps(orphans), encoding="utf-8")
+
+    ws_root = tmp_path / "workspaces"
+    ws_root.mkdir()
+    app = create_app(hermes_home=str(home), workspace_root=str(ws_root))
+    client = TestClient(app)
+    data = client.get(f"/api/sessions/{sid}/overview").json()
+
+    details = {e["detail"] for e in data["events"]}
+    # Committed user message AND the interrupted turn's agent activity are charted.
+    assert "build it" in details
+    assert "partial reply before the stop" in details
+    assert {e["event_type"] for e in data["events"]} >= {"user_message", "tool_call", "message"}
+    # Orphans keep their real exact times (so they land at their true spot).
+    assert all(e["time_exact"] for e in data["events"] if e["event_type"] == "tool_call")

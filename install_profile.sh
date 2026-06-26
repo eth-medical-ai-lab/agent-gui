@@ -8,6 +8,7 @@
 # on your answers.
 #
 #   • API   → Gemini  (prompts for GEMINI_API_KEY, written to the profile .env)
+#   • API   → Claude  (prompts for ANTHROPIC_API_KEY, written to the profile .env)
 #   • Local → vLLM    (prompts for endpoint URL + model name)
 #   • Local → Ollama  (prompts for serve URL + model name)
 #
@@ -104,28 +105,50 @@ PY
 
 # Build + install one profile from interactive answers.
 configure_one() {
-  local name model_block custom_block gemini_key=""
+  local name model_block custom_block gemini_key="" anthropic_key=""
   prompt_default "Profile name" "GUIAgent" name
 
   echo
   echo "Model source for '$name':"
-  echo "  1) API   (Gemini)"
+  echo "  1) API   (Gemini or Claude)"
   echo "  2) Local (vLLM or Ollama)"
   local src
   read -r -p "Choose 1 or 2 [1]: " src; [ -n "$src" ] || src=1
 
   if [ "$src" = "1" ]; then
-    local gmodel
-    prompt_default "Gemini model" "gemini-3.1-flash-lite" gmodel
-    read -rs -p "GEMINI_API_KEY (input hidden, Enter to skip): " gemini_key; echo
-    model_block=$(cat <<EOF
+    echo
+    echo "  1) Gemini"
+    echo "  2) Claude (Anthropic)"
+    local api
+    read -r -p "Choose 1 or 2 [1]: " api; [ -n "$api" ] || api=1
+
+    if [ "$api" = "2" ]; then
+      local cmodel
+      prompt_default "Claude model" "claude-opus-4-8" cmodel
+      read -rs -p "ANTHROPIC_API_KEY (input hidden, Enter to skip): " anthropic_key; echo
+      # Hermes ships a native `anthropic` provider (api_mode: anthropic_messages,
+      # x-api-key auth) — no custom_providers block needed.
+      model_block=$(cat <<EOF
+model:
+  default: $cmodel
+  provider: anthropic
+  base_url: https://api.anthropic.com
+EOF
+)
+      custom_block=""
+    else
+      local gmodel
+      prompt_default "Gemini model" "gemini-3.1-flash-lite" gmodel
+      read -rs -p "GEMINI_API_KEY (input hidden, Enter to skip): " gemini_key; echo
+      model_block=$(cat <<EOF
 model:
   default: $gmodel
   provider: gemini
   base_url: https://generativelanguage.googleapis.com/v1beta
 EOF
 )
-    custom_block=""
+      custom_block=""
+    fi
   else
     echo
     echo "  1) vLLM"
@@ -235,6 +258,10 @@ EOF
     if [ -n "$gemini_key" ]; then
       set_env_key "$env_file" "GEMINI_API_KEY" "$gemini_key"
       echo "    ✓ wrote GEMINI_API_KEY to $name/.env"
+    fi
+    if [ -n "$anthropic_key" ]; then
+      set_env_key "$env_file" "ANTHROPIC_API_KEY" "$anthropic_key"
+      echo "    ✓ wrote ANTHROPIC_API_KEY to $name/.env"
     fi
   fi
 

@@ -13,6 +13,8 @@
 
 Each task runs as an agent sitting at a desk in a scrollable office. Click a desk to watch its live activity feed, file tree, terminal, and full debug message. Redirect and reassign agents mid-task without leaving the UI.
 
+> 🆕 **What's new in v1.1.0:** Claude model (agent SDK & API key for hermes) support, subagent visualization, research task templates, and GPU server support. See [Release Notes](RELEASE_NOTES.md) for the full list.
+
 <p align="center">
   <img src="img/agent-gui-demo.gif" alt="Demonstration of the AgentGUI interface" style="width: 99%;">
 </p>

@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.1.0 (2026-06-22): Research features and support for Claude models & agents.
+## 1.1.0 (2026-06-30): Research features and support for Claude models & agents.
 
 ### Hermes agent integration
 - **Claude API integration** — run Hermes desks on Claude models via an `ANTHROPIC_API_KEY` (Docker-sandboxed, full Hermes toolset).

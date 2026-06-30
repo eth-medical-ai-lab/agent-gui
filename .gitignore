@@ -36,3 +36,29 @@ landing/uploads/
 SECURITY_NOTES.md
 .claude/
 roadmaps.md
+
+# research_tasks run/build artifacts — never commit per-run outputs
+# (the vendored data/*.npz IS committed)
+research_tasks/**/.row_cache/
+research_tasks/**/__pycache__/
+research_tasks/**/last_result*.json
+research_tasks/**/submission.json
+research_tasks/**/candidate_prompt*.txt
+research_tasks/**/improved_prompt.txt
+research_tasks/**/model.pt
+research_tasks/**/runs/
+research_tasks/**/interpretability/
+research_tasks/**/loss_curves.png
+research_tasks/**/comparison.png
+# prompt search iterations (generated during research)
+research_tasks/**/prompts/*
+!research_tasks/**/prompts/.gitkeep
+# dashboard / search outputs (generated per run; keep dirs via .gitkeep)
+research_tasks/**/results/*
+!research_tasks/**/results/.gitkeep
+
+.design-sync/
+.ds-sync/
+ds-bundle/
+frontend/_ds_entry.tsx
+frontend/_ds_styles.css

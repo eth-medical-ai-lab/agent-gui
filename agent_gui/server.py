@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict
@@ -26,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from agent_gui.activity_parser import (
+    MIN_MESSAGE_LEN,
     TOOL_ICONS,
     ActivityEvent,
     _files_from_tool,
@@ -85,6 +87,92 @@ def _worker_repo_env() -> dict[str, str]:
     return {"PYTHONPATH": os.pathsep.join(parts)}
 # Hermes ships its own venv; use that Python so all hermes deps are available.
 _HERMES_VENV_PY = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python3"
+
+# Claude Agent SDK agent runs in a SEPARATE worker, under the GUI's own
+# interpreter (which has claude-agent-sdk) rather than the Hermes venv. A desk is a
+# "Claude SDK desk" when its agent id is one of these reserved ids; such a desk
+# carries HERMES_GUI_AGENT_KIND=claude in its env so the spawn picks the right
+# worker. claude_worker.py speaks the SAME stdout/stdin protocol as hermes_worker.
+# NOTE: the bare id "claude" is deliberately NOT reserved — it belongs to a Hermes
+# profile that talks to the Anthropic API (install_profile.sh).
+_CLAUDE_WORKER_SCRIPT = Path(__file__).parent / "claude_worker.py"
+_CLAUDE_WORKER_PY = sys.executable
+_CLAUDE_AGENT_IDS = frozenset({"claude-sdk", "claude-agent-sdk", "claude-code"})
+
+# Credentials that outrank OAuth / `claude /login` in the claude CLI's precedence
+# (API key > OAuth token > /login). A Claude SDK desk is subscription-only, so we
+# strip every one of these from its worker env — a stale/wrong key (e.g. one that
+# points at a disabled org) would otherwise silently shadow the login. Kept
+# identical to claude_worker.OAUTH_ONLY_SCRUB_KEYS (asserted in tests).
+_CLAUDE_OAUTH_ONLY_SCRUB_KEYS = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+)
+
+
+def _scrub_claude_oauth_only(env: dict) -> None:
+    """Drop API-key / gateway / cloud creds from a Claude SDK desk's worker env so
+    the CLI falls through to OAuth / `claude /login`. Mutates ``env`` in place.
+
+    The SDK inherits the worker's full ``os.environ`` and its ``options.env`` can
+    only OVERRIDE values (not delete them), so keeping these OUT of the spawned env
+    is the only reliable way to force subscription-only auth."""
+    for k in _CLAUDE_OAUTH_ONLY_SCRUB_KEYS:
+        env.pop(k, None)
+
+# Built-in roster card so the Claude Agent SDK agent shows up in the desk/agent picker exactly
+# like a Hermes profile — selecting it sends agent="claude-sdk" through the normal
+# new-desk flow (which places the desk on the office floor).
+_CLAUDE_AGENT_CARD = {
+    "id": "claude-sdk",
+    "name": "Claude Agent SDK",
+    "tagline": "Anthropic Claude Agent SDK · runs on your Claude login (no API key)",
+    "color": "#d97757",
+    "available": True,
+    "model": "sonnet",
+    "base_url": "claude-agent-sdk",
+    "profile_path": "",
+    "is_prototype": False,
+    "clone_from": None,
+}
+
+# Selectable Claude model aliases for the desk model picker AND _claude_model's
+# allowlist (one source of truth). The Claude Agent SDK resolves each alias to its
+# latest snapshot, so these stay current without pinning a dated id. Sonnet is the
+# default (see _CLAUDE_AGENT_CARD["model"]).
+_CLAUDE_MODELS = ("sonnet", "opus", "haiku")
+
+# Fallback agent for a new desk that doesn't explicitly pick a profile (the
+# "Default" tile sends agent=""). Empty (the default) means: use the Hermes base
+# config / Global Default Persona — so configuring that persona actually takes
+# effect and the Claude Agent SDK runs only when it's explicitly chosen. Set
+# AGENT_GUI_DEFAULT_AGENT="claude-sdk" to make brand-new desks default to the SDK.
+_DEFAULT_AGENT = os.environ.get("AGENT_GUI_DEFAULT_AGENT", "").strip().lower()
+
+
+def _claude_model(raw: str) -> str:
+    """Keep only a Claude-valid model; drop anything else (e.g. an Ollama id the GUI
+    sends as its default) so the Claude SDK uses the Claude Code default, not a 400."""
+    m = (raw or "").strip()
+    low = m.lower()
+    return m if (low in _CLAUDE_MODELS or low.startswith("claude")) else ""
+
+
+def _is_claude_agent(agent_id: str) -> bool:
+    return (agent_id or "").strip().lower() in _CLAUDE_AGENT_IDS
+
+
+def _worker_cmd(env: dict) -> "tuple[str, str]":
+    """(interpreter, worker script) for this desk's agent kind.
+
+    Claude desks (``HERMES_GUI_AGENT_KIND=claude``) run claude_worker.py under the
+    GUI interpreter; every other desk runs hermes_worker.py under the Hermes venv."""
+    if env.get("HERMES_GUI_AGENT_KIND") == "claude":
+        return _CLAUDE_WORKER_PY, str(_CLAUDE_WORKER_SCRIPT)
+    venv_py = str(_HERMES_VENV_PY)
+    if not Path(venv_py).exists():
+        venv_py = shutil.which("python3") or "python3"
+    return venv_py, str(_WORKER_SCRIPT)
 
 # Processes started from the workbench (keyed by session_id). With persistent
 # workers this holds the proc only while a TURN is in flight (is_running semantics).
@@ -192,6 +280,17 @@ _orphan_feed_events: dict[str, list[dict]] = {}
 _ORPHAN_FEED_MARKER = ".hermes_feed_orphans.json"
 _ORPHAN_MAX_EVENTS = 400        # per desk, so the sidecar can't grow unbounded
 _ORPHAN_MAX_DETAIL = 80_000     # chars kept per preserved message/reasoning event
+# Subagent traces. When an agent calls delegate_task, Hermes spawns child agents
+# whose lifecycle (start/thinking/tool/progress/complete) the worker relays as
+# {"type":"subagent", ...} events. Unlike the parent's stream, these are kept
+# durably per desk so each subagent gets its own persistent tab that survives
+# turn boundaries, panel reopen, reconnect, AND a server restart. Memory is a
+# cache of the sidecar; keyed session_id → {subagent_id → record}.
+_subagent_records: dict[str, dict[str, dict]] = {}
+_SUBAGENT_MARKER = ".hermes_subagents.json"
+_SUBAGENT_MAX = 64              # distinct subagents kept per desk
+_SUBAGENT_MAX_EVENTS = 600      # timeline events kept per subagent
+_SUBAGENT_MAX_TEXT = 8_000      # chars kept per timeline entry
 # Sessions whose in-flight turn was deliberately interrupted (Stop / barge-in /
 # reassign / worker teardown). Consumed at the turn boundary: it tells the pump
 # the turn did NOT commit to the DB, so its buffer must be preserved as orphans.
@@ -228,6 +327,25 @@ def _note_ws_cancelled(kind: str, session_id: str) -> None:
 _terminal_queues: dict[str, list[asyncio.Queue]] = {}
 # Per-session list of queues for the clean console WebSocket (shell tool I/O only)
 _console_queues: dict[str, list[asyncio.Queue]] = {}
+# ── Persisted Agent Console + Debug terminal logs ─────────────────────────────
+# The console/terminal WS streams are otherwise ephemeral: token/thinking/stderr
+# output is never in Hermes' state.db, and an interrupted turn isn't committed at
+# all — so reopening a desk after a refresh used to show nothing (interrupted) or
+# only the post-refresh tail (in-flight). Fix: tee every broadcast into the current
+# turn's in-memory buffer (replayed to a reconnecting WS so the in-flight turn is
+# whole), and flush that buffer to a per-desk on-disk log at each turn boundary —
+# committed OR interrupted — so the FULL verbatim history survives reloads. The log
+# lives in the desk's private HERMES_HOME (outside the agent's /workspace), seeded
+# once from the DB for desks that already had committed turns. See get_console /
+# get_terminal (read the log) and the console/terminal WS endpoints (replay buffer).
+# Value shape: session_id → [list[str] chunks, int total_chars] for the live turn.
+_console_turn_buf: dict[str, list] = {}
+_terminal_turn_buf: dict[str, list] = {}
+_log_seeded: set[str] = set()                  # desks whose on-disk log was seeded this run
+_CONSOLE_LOG_NAME = ".hermes_gui_console.log"
+_TERMINAL_LOG_NAME = ".hermes_gui_terminal.log"
+_TURN_LOG_MAX_CHARS = 1_000_000   # in-memory per-turn buffer cap (chars), per kind
+_DESK_LOG_MAX_BYTES = 8_000_000   # on-disk log cap (bytes), per kind; front-trimmed
 # Sessions the user has explicitly sent to sleep — auto-resume is blocked until wake.
 # Persisted to ~/.hermes/gui_sleeping.json so restarts don't lose the sleeping state.
 _session_sleeping: set[str] = set()
@@ -269,10 +387,13 @@ _MANAGER_MAX_INTERVENTIONS = 3
 _SOLVED_MARKER = ".audit_passed"
 
 
-def _save_attachments(attachments: list, workspace_dir: "Path") -> tuple[list[str], str]:
+def _save_attachments(attachments: list, workspace_dir: "Path",
+                      *, is_claude: bool = False) -> tuple[list[str], str]:
     """Save base64-encoded image attachments to workspace_dir.
 
     Returns (saved_host_paths, image_note_text).  safe against path traversal.
+    The note is agent-specific: Hermes desks get a ``vision_analyze`` hint; the
+    Claude Code agent (``is_claude``) is told to open the files with its Read tool.
     """
     MAX_ATTACH_BYTES = 25 * 1024 * 1024
     saved: list[str] = []
@@ -293,7 +414,9 @@ def _save_attachments(attachments: list, workspace_dir: "Path") -> tuple[list[st
         except Exception:
             pass
     if saved:
-        note = "\nAttached images saved to workspace (use these host paths with vision_analyze):\n"
+        note = ("\nAttached images saved to your workspace — open them with the Read tool:\n"
+                if is_claude else
+                "\nAttached images saved to workspace (use these host paths with vision_analyze):\n")
         for p in saved:
             note += f"  - {p}\n"
     else:
@@ -507,6 +630,13 @@ _session_event_times: dict[str, list[tuple[str, float, str]]] = {}  # sid → [(
 def _record_event_time(session_id: str, kind: str, ts: "float | None" = None,
                        tool_name: str = "") -> None:
     """Append a real per-event time marker (kind ∈ user_message/message/tool_call/tool_result)."""
+    if kind == "user_message":
+        # Turn start: fold any markers persisted by a PRIOR server run into memory
+        # before this turn records its first marker, so the on-disk store (rewritten
+        # at turn end) is never clobbered with only the new run's markers. The
+        # load runs exactly once per desk per run and only seeds an empty in-memory
+        # list, so it can't duplicate live markers. Idempotent + cheap.
+        _load_event_times(session_id)
     _session_event_times.setdefault(session_id, []).append(
         (kind, float(ts if ts is not None else time.time()), tool_name))
 
@@ -534,14 +664,130 @@ def _record_worker_evt_time(session_id: str, evt: dict, state: dict) -> None:
         _record_event_time(session_id, "tool_result", ts, evt.get("name", ""))
     elif t == "token":
         state["in_thinking"] = False
+        # A run of `token` events = one assistant 'message' — but record its marker
+        # only once the run is substantive, mirroring the thinking branch below.
+        # parse_activity emits a message event only when content's stripped length
+        # exceeds MIN_MESSAGE_LEN; a run that stays whitespace-only or tiny (e.g. a
+        # stray space a model emits right before a tool call) would otherwise add a
+        # surplus 'message' marker. _apply_real_times matches markers FIFO per kind,
+        # so each surplus marker shifts every later message onto an earlier run's
+        # time — which is what desynced agent messages from their tool calls.
+        # Applying the SAME threshold keeps the marker count aligned 1:1.
         if not state.get("in_text"):
             state["in_text"] = True
-            _record_event_time(session_id, "message", ts)
+            state["text_marked"] = False
+            state["text_run"] = ""
+        if not state.get("text_marked"):
+            state["text_run"] = (state.get("text_run") or "") + (evt.get("text") or "")
+            if len(state["text_run"].strip()) > MIN_MESSAGE_LEN:
+                state["text_marked"] = True
+                _record_event_time(session_id, "message", ts)
     elif t == "thinking":
         state["in_text"] = False
+        # A new reasoning run starts here, but DON'T record its marker yet —
+        # wait for the first NON-whitespace token. parse_activity drops
+        # whitespace-only reasoning (the empty `<think>\n\n</think>` qwen3-style
+        # models emit on most tool-calling turns: `if (reasoning := …strip()):`),
+        # so a marker per whitespace run would make thinking_start markers
+        # outnumber the feed's reasoning events. _apply_real_times matches them
+        # FIFO per kind, so the surplus early markers shifted every real reasoning
+        # step's time to an earlier run's — every trace after the first showed a
+        # stuck, too-early timestamp. Recording only substantive runs keeps the
+        # marker count aligned 1:1 with the parsed events.
         if not state.get("in_thinking"):
             state["in_thinking"] = True
+            state["thinking_marked"] = False
+        if not state.get("thinking_marked") and (evt.get("text") or "").strip():
+            state["thinking_marked"] = True
             _record_event_time(session_id, "thinking_start", ts)
+
+
+# ── Persisting per-event time markers (so they survive a server restart) ──────
+# The in-memory markers above are wiped on restart — which is exactly when the
+# overview/feed lose their real per-event timing and fall back to Hermes's coarse
+# batch-flush times (the "Overview collapses to a sliver" bug). We mirror the
+# markers to a small GUI-owned per-desk file so the *recording* path stays
+# authoritative across restarts WITHOUT touching Hermes's state.db (we're
+# read-only, pinned to v0.15.1) or parsing agent.log. The file lives in the desk's
+# private HERMES_HOME (gui_sandboxes/<sid>), OUTSIDE the agent's /workspace bind
+# mount, so it's invisible to the agent + Files tab and is removed with the
+# sandbox on desk delete. Stored as a JSON array of [kind, ts, tool_name] rows,
+# matching the in-memory `_session_event_times` shape 1:1.
+_EVENT_TIMES_NAME = ".hermes_gui_event_times.json"
+_event_times_loaded: set[str] = set()  # desks whose on-disk markers we've folded in
+
+
+def _event_times_path(session_id: str) -> "Path | None":
+    # Canonical per-desk private home first — resolves even when _session_workspaces
+    # isn't populated yet (e.g. the first read right after a server restart), which
+    # _desk_state_dir depends on. Each desk reads/writes ONLY its own store, so the
+    # overview's per-desk merge never pools markers across related sessions
+    # (DESK_ISOLATION_AUDIT invariant).
+    db = _db_ref
+    if db is not None:
+        cand = db._sandbox_root / session_id
+        if cand.is_dir():
+            return cand / _EVENT_TIMES_NAME
+    # Legacy slug layout (no gui_sandboxes base): the workspace-derived state dir.
+    base = _desk_state_dir(session_id)
+    return base / _EVENT_TIMES_NAME if base else None
+
+
+def _load_event_times(session_id: str) -> None:
+    """Fold a desk's persisted markers into memory once per server run.
+
+    Always runs BEFORE this run records any marker for the desk — at turn start
+    (via _record_event_time's user_message branch), at pump start, and on the read
+    path (via _apply_real_times) — so it only ever seeds an EMPTY in-memory list
+    and can't duplicate markers already recorded live. After a restart this
+    restores the full per-event timing the overview/feed need; for a desk that
+    already streamed this run (in-memory non-empty) the disk copy is a subset, so
+    we skip to avoid double-counting."""
+    if session_id in _event_times_loaded:
+        return
+    _event_times_loaded.add(session_id)
+    if _session_event_times.get(session_id):
+        return  # live markers already recorded this run — disk would duplicate them
+    path = _event_times_path(session_id)
+    if path is None or not path.exists():
+        return
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    markers: list[tuple[str, float, str]] = []
+    for row in parsed if isinstance(parsed, list) else []:
+        if isinstance(row, list) and len(row) >= 2:
+            try:
+                markers.append((str(row[0]), float(row[1]),
+                                str(row[2]) if len(row) > 2 and row[2] else ""))
+            except (TypeError, ValueError):
+                continue
+    if markers:
+        _session_event_times[session_id] = markers
+
+
+def _persist_event_times(session_id: str) -> None:
+    """Mirror a desk's in-memory markers to its private store at a turn boundary.
+
+    Called AFTER any orphan-turn marker pruning, so the file always equals the
+    authoritative in-memory list (committed-turn markers only). Atomic rewrite
+    (temp + os.replace) so a crash mid-write can't leave a torn file that would
+    read back as 'no timing'. No-op when there's nothing recorded, so an empty turn
+    never wipes a good file."""
+    recorded = _session_event_times.get(session_id)
+    if not recorded:
+        return
+    path = _event_times_path(session_id)
+    if path is None:
+        return
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps([[k, t, n] for k, t, n in recorded]),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _buffer_live_event(session_id: str, evt: dict) -> None:
@@ -623,6 +869,107 @@ def _orphan_event(ts: float, event_type: str, icon: str, title: str, detail: str
         "is_error": is_error, "files_touched": files_touched or [],
         "time_exact": True,
     }
+
+
+def _subagent_sidecar_path(session_id: str) -> "Path | None":
+    ws = _session_workspaces.get(session_id)
+    return Path(ws) / _SUBAGENT_MARKER if ws else None
+
+
+def _load_subagents(session_id: str, ws: "Path | None" = None) -> dict[str, dict]:
+    """Subagent records for a desk: memory cache first, else the sidecar."""
+    cached = _subagent_records.get(session_id)
+    if cached is not None:
+        return cached
+    path = (ws / _SUBAGENT_MARKER) if ws else _subagent_sidecar_path(session_id)
+    recs: dict[str, dict] = {}
+    if path is not None and path.exists():
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                recs = {k: v for k, v in parsed.items() if isinstance(v, dict)}
+        except Exception:
+            recs = {}
+    _subagent_records[session_id] = recs
+    return recs
+
+
+def _persist_subagents(session_id: str) -> None:
+    path = _subagent_sidecar_path(session_id)
+    if path is None:
+        return
+    try:
+        path.write_text(json.dumps(_subagent_records.get(session_id, {})),
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _buffer_subagent_event(session_id: str, evt: dict) -> None:
+    """Fold a {"type":"subagent"} worker event into its desk's durable record.
+
+    Builds/updates one record per subagent_id (goal=input, output, status, a
+    capped timeline) and writes it to the per-desk sidecar so the tab and its
+    I/O survive reloads and restarts. Runs alongside _buffer_live_event in the
+    pumps; the live copy still streams to the client for real-time updates."""
+    if evt.get("type") != "subagent":
+        return
+    sid = evt.get("subagent_id")
+    if not sid:
+        return
+    recs = _load_subagents(session_id)
+    ev = evt.get("event")
+    try:
+        ts = float(evt.get("ts") or time.time())
+    except (TypeError, ValueError):
+        ts = time.time()
+    rec = recs.get(sid)
+    if rec is None:
+        if len(recs) >= _SUBAGENT_MAX:
+            return  # cap distinct subagents per desk
+        rec = {"subagent_id": sid, "goal": "", "status": "running",
+               "started_at": ts, "ended_at": None, "output": "", "events": []}
+        recs[sid] = rec
+    for k in ("parent_id", "depth", "model", "task_index", "task_count"):
+        if evt.get(k) is not None:
+            rec[k] = evt[k]
+    if ev == "start":
+        rec["goal"] = evt.get("goal") or rec.get("goal") or ""
+        rec["status"] = "running"
+        rec.setdefault("started_at", ts)
+    elif ev == "complete":
+        rec["status"] = evt.get("status") or "ok"
+        rec["output"] = str(evt.get("output") or rec.get("output") or "")[:_SUBAGENT_MAX_TEXT]
+        rec["ended_at"] = ts
+        for k in ("duration_seconds", "output_tokens", "api_calls", "cost_usd"):
+            if evt.get(k) is not None:
+                rec[k] = evt[k]
+    timeline = rec.setdefault("events", [])
+    if len(timeline) < _SUBAGENT_MAX_EVENTS:
+        slim: dict = {"event": ev, "ts": ts}
+        for k in ("text", "tool_name", "preview", "goal", "status",
+                  "output", "duration_seconds"):
+            val = evt.get(k)
+            if val is not None:
+                slim[k] = str(val)[:_SUBAGENT_MAX_TEXT] if isinstance(val, str) else val
+        timeline.append(slim)
+    _subagent_records[session_id] = recs
+    _persist_subagents(session_id)
+def _persist_claude_user_message(session_id: str, message: str) -> None:
+    """Persist a Claude desk's user prompt to its orphan feed.
+
+    Claude desks have no state.db, so the orphan feed is their ONLY durable store.
+    The prompt is never part of the live event buffer (that holds worker output —
+    tokens/thinking/tool calls), so without this a reloaded feed would show the
+    agent's reply with no question. Strips the injected workspace/attachment header
+    exactly as ``parse_activity`` does for DB-backed user messages, so the bubble
+    matches a Hermes desk's; a header-only/blank message records nothing."""
+    clean = strip_injected_prefix(message or "")
+    if not clean:
+        return
+    _append_orphan_feed(session_id, [
+        _orphan_event(time.time(), "user_message", "👤", "User", clean),
+    ])
 
 
 def _preserve_orphan_turn(session_id: str, *, error_msg: "str | None" = None,
@@ -719,10 +1066,7 @@ def _merge_orphan_feed(events: "list[ActivityEvent]", session_id: str,
         return events
 
     def _key(ts: str) -> float:
-        try:
-            return datetime.fromisoformat((ts or "").replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            return 0.0
+        return _iso_to_epoch(ts) or 0.0
 
     seen = {(e.event_type, (e.detail or "").strip()) for e in events}
     merged: list[ActivityEvent] = []
@@ -746,12 +1090,6 @@ def _merge_orphan_feed(events: "list[ActivityEvent]", session_id: str,
 # The num_ctx-capped Ollama model variant the GUI runs (see _ensure_capped_model).
 # Set at startup; falls back to the configured default model if capping fails.
 _EFFECTIVE_MODEL: str = ""
-# A SEPARATE small model for the auxiliary title/judge calls. These run at every
-# turn boundary; if they hit the agent's model they overwrite its single Ollama KV
-# slot and evict the cached system-prompt prefix (see _prewarm_once), making the
-# next desk cold again. Routing them to a different model keeps the agent's slot —
-# and its primed prefix — intact. Falls back to _EFFECTIVE_MODEL if no small model.
-_AUX_MODEL: str = ""
 _capped_cache: dict[str, str] = {}   # base model name → capped variant (or base)
 # Team manager backend. When a profile is selected, its config.yaml + .env drive
 # the aux (audit / judge / title) calls — so the manager can run on Gemini, vLLM,
@@ -773,6 +1111,25 @@ _DESK_DOCKER_ENV = {
     "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": "true",
     "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "true",
 }
+
+
+# Optional GPU pinning for host-run agent workers. The Claude Code desk runs its
+# Bash/training commands directly on the host (claude_worker.py — no Docker), so
+# any CUDA work inherits the worker's environment. Set
+# HERMES_GUI_CUDA_VISIBLE_DEVICES (e.g. "2", or "2,3") to confine every agent's
+# GPU use to those devices. CUDA_DEVICE_ORDER=PCI_BUS_ID makes the index match
+# `nvidia-smi` numbering instead of CUDA's fastest-first default, so "2" reliably
+# means nvidia-smi GPU 2. Applied to the worker spawn only (not exported
+# process-wide) so it doesn't also pin the server's own Ollama/aux model calls.
+# Unset → no pinning (prior behavior, agent sees all GPUs).
+def _gpu_worker_env() -> "dict[str, str]":
+    dev = os.environ.get("HERMES_GUI_CUDA_VISIBLE_DEVICES", "").strip()
+    if not dev:
+        return {}
+    return {"CUDA_VISIBLE_DEVICES": dev, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+
+
+_GPU_ENV = _gpu_worker_env()
 
 # Whether to KEEP a desk's sandbox container alive after the GUI is done with it.
 #   off (default): the GUI reaps a desk's `hermes-*` container when the desk is
@@ -967,18 +1324,37 @@ async def _fallback_ollama_model(base_url: str, model: str) -> str:
     return model
 
 
+def _is_native_anthropic_provider(provider: str) -> bool:
+    """True for Hermes' native Anthropic provider — the ``claude`` profile that
+    install_profile.sh writes (``provider: anthropic``, ANTHROPIC_API_KEY).
+
+    api.anthropic.com has no OpenAI /chat/completions route (→404), so a manager
+    running on this profile must use the Anthropic Messages transport (x-api-key,
+    /v1/messages), not _openai_aux_chat. Aliases mirror hermes_worker._is_native_
+    anthropic so "native anthropic" means the same thing on both paths.
+    """
+    return (provider or "").strip().lower() in (
+        "anthropic", "claude", "claude-oauth", "claude-code")
+
+
 async def _ollama_aux_chat(base_url: str, model: str, prompt: str,
                            max_tokens: int) -> str:
     """Run a short auxiliary completion (title, judge, audit, progress).
 
-    Uses OpenAI-compat ``/v1/chat/completions`` for every backend (Ollama and vLLM).
-    Auxiliary calls do not need native ``/api/chat`` or live thinking; routing them
-    through ``/v1`` avoids 400s from missing capped variants, unsupported ``think``
-    on non-reasoning models (e.g. llama3.2:3b), and empty-model races at turn end.
-    Returns "" on error.
+    Uses OpenAI-compat ``/v1/chat/completions`` for every backend (Ollama and
+    vLLM); the one exception is the native Anthropic manager profile, which routes
+    through _anthropic_aux_chat (x-api-key, /v1/messages — api.anthropic.com has
+    no /chat/completions route). Auxiliary calls do not need native ``/api/chat``
+    or live thinking; routing them through ``/v1`` avoids 400s from missing capped
+    variants, unsupported ``think`` on non-reasoning models (e.g. llama3.2:3b),
+    and empty-model races at turn end. Returns "" on error.
     """
     if not base_url or not (model or "").strip():
         return ""
+    # Only ever set when a manager profile is selected; the installed `claude`
+    # profile is the one that needs the Messages transport.
+    if _is_native_anthropic_provider(_MGR_PROVIDER):
+        return await _anthropic_aux_chat(base_url, model.strip(), prompt, max_tokens)
     model = await _fallback_ollama_model(base_url, model.strip())
     return await _openai_aux_chat(base_url, model, prompt, max_tokens)
 
@@ -1032,6 +1408,52 @@ async def _openai_aux_chat(base_url: str, model: str, prompt: str,
     except Exception:
         return ""
 
+
+async def _anthropic_aux_chat(base_url: str, model: str, prompt: str,
+                              max_tokens: int) -> str:
+    """Auxiliary completion against the Anthropic Messages API.
+
+    The ``claude`` profile (install_profile.sh) talks to api.anthropic.com, which
+    has no OpenAI /chat/completions route — it uses x-api-key auth and POST
+    /v1/messages with a distinct request/response shape. Mirrors the transport
+    hermes_worker forces for the agent (api_mode: anthropic_messages). The key is
+    read from the profile's ANTHROPIC_API_KEY into _MGR_API_KEY. Returns "" on error.
+    """
+    root = base_url.rstrip("/")
+    # base_url is the API root (https://api.anthropic.com); tolerate a trailing /v1.
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")].rstrip("/")
+    endpoint = f"{root}/v1/messages"
+    budget = min(max(max_tokens * 12, 2048), 8192)
+    headers = {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    if _MGR_API_KEY:
+        headers["x-api-key"] = _MGR_API_KEY
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            r = await client.post(
+                endpoint,
+                headers=headers,
+                json={
+                    "model": model,
+                    "max_tokens": budget,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+        if r.status_code != 200:
+            return ""
+        data = r.json()
+        # content is a list of blocks; concatenate the text blocks.
+        blocks = data.get("content") or []
+        text = "".join(
+            b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+        )
+        return text.strip()
+    except Exception:
+        return ""
+
 # ── Heartbeat auto-continue ───────────────────────────────────────────────────
 # Opt-in per desk: when an agent finishes a turn while still having unfinished
 # work in TASK.md, automatically resume it so long/multi-step tasks keep going
@@ -1040,6 +1462,14 @@ _session_autocontinue: dict[str, bool] = {}     # session_id → enabled
 _session_continue_count: dict[str, int] = {}    # session_id → auto-resumes used
 _session_user_stopped: set[str] = set()         # sessions the user explicitly stopped
 _AUTO_CONTINUE_MAX = 25                          # hard cap on consecutive auto-resumes
+
+
+def _iso_to_epoch(ts: str) -> "float | None":
+    """Parse an ISO-8601 timestamp to epoch seconds, or None if unparseable."""
+    try:
+        return datetime.fromisoformat((ts or "").replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
 
 
 def _apply_real_times(events: list, session_id: str) -> None:
@@ -1053,7 +1483,23 @@ def _apply_real_times(events: list, session_id: str) -> None:
     `time_exact=False`, so the UI marks them approximate instead of inventing a
     time. No recorded data (e.g. after a server restart) → everything stays
     approximate.
+
+    User messages get a guard the other kinds don't need. Hermes persists each
+    user turn at turn-START with its own real timestamp (only the assistant/tool
+    half of a turn is batch-flushed at one clustered time), so a user message's DB
+    time is already accurate. The matching `user_message` marker is recorded
+    server-side at that same turn-start, so for the correct pairing marker_time <=
+    db_time always. We therefore let a marker only REFINE a user message earlier,
+    never push it LATER: a marker sitting after a user message's DB time belongs
+    to a later turn, so we skip it (leaving it for the message it really matches).
+    Without this, a mid-desk server restart that wiped the original prompt's
+    marker (in-memory only) — while the prompt's user row survived in the DB —
+    left just the resume turn's marker, which FIFO then handed to the prompt,
+    dragging its displayed time forward past the interrupted turn's orphan events.
+    The feed then showed "orphans, then prompt, then resumed work" instead of
+    prompt-first.
     """
+    _load_event_times(session_id)  # restore markers persisted by a prior run (once)
     recorded = _session_event_times.get(session_id)
     if not recorded:
         return
@@ -1064,12 +1510,19 @@ def _apply_real_times(events: list, session_id: str) -> None:
     for e in events:
         kind = "message" if e.event_type == "compression" else e.event_type
         dq = queues.get(kind)
-        if dq:
-            try:
-                e.timestamp = datetime.fromtimestamp(dq.popleft(), tz=timezone.utc).isoformat()
-                e.time_exact = True
-            except Exception:
-                pass
+        if not dq:
+            continue
+        if e.event_type == "user_message":
+            db_t = _iso_to_epoch(e.timestamp)
+            # 1s slack absorbs same-host clock granularity; a mismatched
+            # later-turn marker is minutes off, far beyond this.
+            if db_t is not None and dq[0] > db_t + 1.0:
+                continue
+        try:
+            e.timestamp = datetime.fromtimestamp(dq.popleft(), tz=timezone.utc).isoformat()
+            e.time_exact = True
+        except Exception:
+            pass
 
 
 def _evt_to_terminal(evt: dict) -> str:
@@ -1181,14 +1634,146 @@ def _backfill_console(session_id: str, messages: list) -> str:
     return "".join(out)
 
 
+def _desk_state_dir(session_id: str) -> "Path | None":
+    """The desk's private HERMES_HOME (``gui_sandboxes/<sid>``) — where GUI-only
+    console/terminal logs live. It sits OUTSIDE the agent's ``/workspace`` bind
+    mount, so the logs are invisible to the agent and the Files tab, and are removed
+    with the sandbox on desk delete. Anchored on the same workspace map the orphan
+    feed uses (set by the time a worker streams). Falls back to the workspace dir
+    for the legacy slug layout (no ``gui_sandboxes`` base)."""
+    ws = _session_workspaces.get(session_id)
+    if not ws:
+        return None
+    p = Path(ws)
+    try:
+        if (p.name == "workspace" and p.parent.name == "default"
+                and p.parents[1].name == "docker"):
+            return p.parents[2]
+    except IndexError:
+        pass
+    return p
+
+
+def _desk_log_path(session_id: str, kind: str) -> "Path | None":
+    base = _desk_state_dir(session_id)
+    if base is None:
+        return None
+    return base / (_CONSOLE_LOG_NAME if kind == "console" else _TERMINAL_LOG_NAME)
+
+
+def _read_desk_log(session_id: str, kind: str) -> str:
+    path = _desk_log_path(session_id, kind)
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _append_desk_log(session_id: str, kind: str, text: str) -> None:
+    """Append console/terminal text to a desk's on-disk log, capping growth by
+    keeping the tail (the oldest output is the most expendable)."""
+    if not text:
+        return
+    path = _desk_log_path(session_id, kind)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text)
+        if path.stat().st_size > _DESK_LOG_MAX_BYTES:
+            with path.open("rb") as fh:
+                fh.seek(-_DESK_LOG_MAX_BYTES, os.SEEK_END)
+                tail = fh.read()
+            nl = tail.find(b"\n")          # drop a partial first line for cleanliness
+            if 0 <= nl < len(tail) - 1:
+                tail = tail[nl + 1:]
+            path.write_bytes(tail)
+    except OSError:
+        pass
+
+
+def _ensure_log_seeded(session_id: str) -> None:
+    """Seed a desk's on-disk logs from its DB the first time we touch them this run,
+    so a desk that already has committed turns (pre-feature, or after a restart with
+    no log yet) keeps that history. Called at turn START, where the DB holds only
+    PRIOR turns — the in-flight turn is flushed from the live buffer at turn end, so
+    this can't duplicate it. No-op once seeded, when a log already exists, or before
+    the workspace is known (retried on a later turn)."""
+    if session_id in _log_seeded:
+        return
+    cpath = _desk_log_path(session_id, "console")
+    tpath = _desk_log_path(session_id, "terminal")
+    if cpath is None or tpath is None:
+        return  # workspace not resolvable yet — retry on a later turn
+    _log_seeded.add(session_id)
+    if cpath.exists() and tpath.exists():
+        return  # already populated (e.g. survived a server restart) — don't reseed
+    db = _db_ref
+    if db is None:
+        return
+    try:
+        if db._desk_db(session_id):
+            messages = db.get_desk_messages(session_id, limit=5000)
+        else:
+            messages = db.get_messages(session_id, limit=5000)
+    except Exception:
+        return
+    try:
+        if not cpath.exists():
+            seed = _backfill_console(session_id, messages)
+            if seed:
+                cpath.write_text(seed, encoding="utf-8")
+        if not tpath.exists():
+            seed = _backfill_terminal(messages)
+            if seed:
+                tpath.write_text(seed, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _buffer_turn_log(session_id: str, kind: str, text: str) -> None:
+    """Accumulate the current turn's console/terminal text for WS replay + flush,
+    capping the in-memory buffer by dropping the oldest chunks."""
+    if not text:
+        return
+    store = _console_turn_buf if kind == "console" else _terminal_turn_buf
+    entry = store.setdefault(session_id, [[], 0])
+    entry[0].append(text)
+    entry[1] += len(text)
+    while entry[1] > _TURN_LOG_MAX_CHARS and len(entry[0]) > 1:
+        entry[1] -= len(entry[0].pop(0))
+
+
+def _turn_log_text(session_id: str, kind: str) -> str:
+    """The current (in-flight) turn's buffered console/terminal text, or ''."""
+    store = _console_turn_buf if kind == "console" else _terminal_turn_buf
+    entry = store.get(session_id)
+    return "".join(entry[0]) if entry else ""
+
+
+def _flush_turn_log(session_id: str) -> None:
+    """At a turn boundary, persist the buffered console/terminal text to the desk's
+    on-disk log and clear the buffer. Runs for committed AND interrupted turns — an
+    interrupted turn never reaches the DB, so the log is its only durable record."""
+    for kind, store in (("console", _console_turn_buf), ("terminal", _terminal_turn_buf)):
+        entry = store.pop(session_id, None)
+        if entry and entry[0]:
+            _append_desk_log(session_id, kind, "".join(entry[0]))
+
+
 async def _pump_worker(session_id: str, proc: asyncio.subprocess.Process,
                        queue: asyncio.Queue) -> None:
     """Background task: read worker stdout and put events into the live queue."""
     def _broadcast_terminal(text: str) -> None:
+        _buffer_turn_log(session_id, "terminal", text)
         for tq in list(_terminal_queues.get(session_id, [])):
             tq.put_nowait(text)
 
     def _broadcast_console(text: str) -> None:
+        _buffer_turn_log(session_id, "console", text)
         for cq in list(_console_queues.get(session_id, [])):
             cq.put_nowait(text)
 
@@ -1207,6 +1792,8 @@ async def _pump_worker(session_id: str, proc: asyncio.subprocess.Process,
     error_msg: str | None = None      # message of the worker's fatal "error" event
     _evt_state: dict = {}  # per-turn text-run tracking for real-time recording
     _clear_live_buffer(session_id)  # fresh turn — drop any stale replay buffer
+    _ensure_log_seeded(session_id)  # seed the on-disk console/terminal log once
+    _load_event_times(session_id)   # fold prior-run markers in before this turn records any
     try:
         assert proc.stdout
         async for raw in proc.stdout:
@@ -1224,6 +1811,7 @@ async def _pump_worker(session_id: str, proc: asyncio.subprocess.Process,
             # Buffer BEFORE enqueueing so the buffer is always a superset of the
             # queue (see _buffer_live_event), then enqueue for the live WS.
             _buffer_live_event(session_id, evt)
+            _buffer_subagent_event(session_id, evt)  # durable per-subagent trace
             await queue.put(evt)
             _record_worker_evt_time(session_id, evt, _evt_state)
             term_text = _evt_to_terminal(evt)
@@ -1241,6 +1829,7 @@ async def _pump_worker(session_id: str, proc: asyncio.subprocess.Process,
         pass
     finally:
         stderr_task.cancel()
+        _flush_turn_log(session_id)  # persist this turn's console/terminal output
         if terminal_type == "done":
             # Turn committed: Hermes flushed it to the DB, so the DB snapshot now
             # covers it — drop the replay buffer so a reconnect doesn't double-show it.
@@ -1253,6 +1842,10 @@ async def _pump_worker(session_id: str, proc: asyncio.subprocess.Process,
             _session_turn_interrupted.discard(session_id)
             _preserve_orphan_turn(session_id, error_msg=error_msg,
                                   interrupted=terminal_type is None)
+        # Mirror this turn's per-event time markers to disk so they survive a
+        # restart. Runs after the orphan branch above, whose pruning is already
+        # reflected in the in-memory list this rewrites from.
+        _persist_event_times(session_id)
         # Always push a sentinel so the WS loop can exit cleanly
         await queue.put({"type": "done"})
         # Only clear the registry if it still points at THIS worker — a barge-in
@@ -1306,10 +1899,12 @@ async def _persistent_pump(session_id: str, proc: asyncio.subprocess.Process) ->
     'done' sentinel to the WS, fires turn-end side effects) but keeps the process
     warm for the next turn. Only process exit tears the worker down."""
     def _broadcast_terminal(text: str) -> None:
+        _buffer_turn_log(session_id, "terminal", text)
         for tq in list(_terminal_queues.get(session_id, [])):
             tq.put_nowait(text)
 
     def _broadcast_console(text: str) -> None:
+        _buffer_turn_log(session_id, "console", text)
         for cq in list(_console_queues.get(session_id, [])):
             cq.put_nowait(text)
 
@@ -1326,6 +1921,8 @@ async def _persistent_pump(session_id: str, proc: asyncio.subprocess.Process) ->
     stderr_task = asyncio.create_task(_drain_stderr())
     _evt_state: dict = {}  # per-turn text-run tracking for real-time recording
     turn_error: str | None = None  # "error" event msg of the current turn, if any
+    _ensure_log_seeded(session_id)  # seed the on-disk console/terminal log once
+    _load_event_times(session_id)   # fold prior-run markers in before this turn records any
     try:
         assert proc.stdout
         async for raw in proc.stdout:
@@ -1351,17 +1948,22 @@ async def _persistent_pump(session_id: str, proc: asyncio.subprocess.Process) ->
                 turn_error = evt.get("msg") or "Worker error"
             if t == "turn_done":
                 _evt_state["in_text"] = False  # next turn starts a fresh text run
+                _flush_turn_log(session_id)  # persist the finished turn's output
                 interrupted = session_id in _session_turn_interrupted
                 _session_turn_interrupted.discard(session_id)
                 if turn_error is not None or interrupted:
-                    # The turn errored or was soft-interrupted — Hermes never
-                    # flushed it, so keep its streamed content in the feed.
+                    # The turn errored or was soft-interrupted — never flushed to
+                    # the DB, so keep its streamed content in the feed.
                     _preserve_orphan_turn(session_id, error_msg=turn_error,
                                           interrupted=turn_error is None)
                 else:
-                    # Turn committed to the DB — drop the replay buffer; the next
-                    # turn rebuilds it from scratch.
+                    # Clean turn: it committed to the desk's state.db — Hermes, and
+                    # now Claude too via claude_worker — so the DB snapshot covers
+                    # it; drop the replay buffer and the next turn rebuilds it.
                     _clear_live_buffer(session_id)
+                # Mirror this turn's markers to disk (after orphan pruning) so they
+                # outlive a restart — same as the one-shot pump's finally block.
+                _persist_event_times(session_id)
                 turn_error = None
                 q = _live_queues.get(session_id)
                 if q:
@@ -1375,6 +1977,7 @@ async def _persistent_pump(session_id: str, proc: asyncio.subprocess.Process) ->
                 continue
             # Buffer BEFORE enqueueing so the buffer stays a superset of the queue.
             _buffer_live_event(session_id, evt)
+            _buffer_subagent_event(session_id, evt)  # durable per-subagent trace
             q = _live_queues.get(session_id)
             if q:
                 await q.put(evt)
@@ -1389,6 +1992,7 @@ async def _persistent_pump(session_id: str, proc: asyncio.subprocess.Process) ->
         pass
     finally:
         stderr_task.cancel()
+        _flush_turn_log(session_id)  # persist a turn left in flight by process exit
         # Process died. If a turn was in flight (non-empty buffer / pending error /
         # interrupt flag), it never reached the DB — preserve it for the feed.
         interrupted = session_id in _session_turn_interrupted
@@ -1396,6 +2000,7 @@ async def _persistent_pump(session_id: str, proc: asyncio.subprocess.Process) ->
         if _live_event_buffer.get(session_id) or turn_error is not None or interrupted:
             _preserve_orphan_turn(session_id, error_msg=turn_error,
                                   interrupted=turn_error is None)
+        _persist_event_times(session_id)  # outlive the restart that killed this worker
         if _persistent_procs.get(session_id) is proc:
             _persistent_procs.pop(session_id, None)
         if _running_procs.get(session_id) is proc:
@@ -1472,9 +2077,9 @@ async def _generate_title(session_id: str) -> None:
             return
         recent = _recent_assistant_text(session_id)
 
+        # Title-gen runs on the manager's own model (selected profile, or the
+        # configured default backend) — see _aux_model_config.
         base_url, model = _aux_model_config()
-        # Title-gen uses the small aux model so it doesn't evict the agent's primed prefix.
-        model = _AUX_MODEL or _EFFECTIVE_MODEL or model
 
         prompt = (
             f"Generate a short title (3-5 words max) describing what this AI agent "
@@ -1512,8 +2117,8 @@ async def _judge_complete(goal: str, recent: str) -> "tuple[bool, str] | None":
     case the caller does nothing (fail safe: never loop on an unknown verdict).
     """
     try:
+        # The manager's own model (selected profile, or configured default backend).
         base_url, model = _aux_model_config()
-        model = _AUX_MODEL or _EFFECTIVE_MODEL or model  # dedicated aux model
         prompt = (
             "You supervise an autonomous agent. Decide if its GOAL is FULLY and "
             "verifiably complete.\n\n"
@@ -1538,18 +2143,25 @@ async def _judge_complete(goal: str, recent: str) -> "tuple[bool, str] | None":
 
 
 def _aux_model_config() -> "tuple[str, str]":
-    """(base_url, model) for manager aux calls (title, judge, progress, audits).
+    """(base_url, model) for the manager's LLM calls (title, judge, progress, audits).
+
+    Always the manager's *own* model — there is no separate small "aux" model.
+    Every manager call (titles, the done-judge, progress, and accuracy-critical
+    audits) uses the SAME model, so they're all exactly as capable as whatever you
+    pointed the manager at.
 
     Resolution order:
-      1. ``<hermes_home>/config.yaml`` ``model.base_url`` / ``model.default``
-      2. Ollama ``http://127.0.0.1:11434/v1`` and ``qwen3.5:4b``
+      1. A user-selected manager profile — its backend AND model verbatim. (Its
+         backend may serve only its own model, so we never substitute another.)
+      2. ``<hermes_home>/config.yaml`` model.base_url / model.default — the
+         configured default backend (via hermes_model_config).
     """
     # A user-selected manager profile overrides the default backend entirely.
     if _MGR_BASE_URL and _MGR_MODEL:
         return _MGR_BASE_URL, _MGR_MODEL
     home = _home_ref or Path.home() / ".hermes"
     base_url, model = hermes_model_config(home)
-    return base_url, (_AUX_MODEL or _EFFECTIVE_MODEL or model)
+    return base_url, (_EFFECTIVE_MODEL or model)
 
 
 async def _aux_json(base_url: str, model: str, prompt: str, max_tokens: int,
@@ -1816,11 +2428,9 @@ async def _run_audit(session_id: str, ws: Path, force: bool = False) -> "dict | 
             "max_interventions": _MANAGER_MAX_INTERVENTIONS,
         }
 
+    # The manager audits on its own model — the selected profile's, or the
+    # configured default-backend model (same model it uses for titles/judging).
     base_url, model = _aux_model_config()
-    # Audits are infrequent but accuracy-critical — prefer the agent's capped model
-    # (already resident/warm) over the small aux model used for titles/judges.
-    _, fallback = hermes_model_config(_home_ref or Path.home() / ".hermes")
-    model = _EFFECTIVE_MODEL or _AUX_MODEL or model or fallback
 
     transcript, _ = _build_transcript(session_id)
     sources_inspected = {
@@ -2224,12 +2834,19 @@ def create_app(
     workspace_root: str | None = None,
     allowed_origins: list[str] | None = None,
     gui_config: GuiConfig | None = None,
+    experimental: bool = False,
 ) -> FastAPI:
     global _db_ref, _home_ref, _gui_cfg
     cfg = gui_config or load_gui_config(hermes_home)
     home = cfg.hermes_home
     _home_ref = home
     _gui_cfg = cfg
+    # Experimental/developmental features gate (CLI: --experimental). Currently it
+    # gates the Claude Code SDK agent: when off (default) the claude/claude-code
+    # card is withheld from the desk roster (_roster_agents) and new Claude desks
+    # are refused (POST /api/sessions/new), so the released app exposes only the
+    # stable Hermes agents. Nested route handlers close over this local.
+    experimental = bool(experimental)
     ws_root = Path(workspace_root) if workspace_root else home / "sandboxes" / "docker" / "default" / "workspace"
     db = HermesDB(home)
     _db_ref = db  # let module-level title helpers read recent activity
@@ -2459,11 +3076,21 @@ def create_app(
         nodes.sort(key=lambda n: (not n["is_dir"], n["name"].lower()))
         return nodes
 
-    def _team_files_note(ws: Path) -> str:
-        """Workspace-header hint when a desk's team has files in the File Repo."""
+    def _team_files_note(ws: Path, *, is_claude: bool = False) -> str:
+        """Workspace-header hint when a desk's team has files in the File Repo.
+
+        Hermes desks reach the repo through the Docker mount; the Claude Code agent
+        runs on the host, where ``team_files/`` is a real folder in its cwd."""
         tid = _load_desk_team_id(ws)
         if not tid or not _team_repo_has_files(tid):
             return ""
+        if is_claude:
+            host_tf = ws / _TEAM_FILES_SUBDIR
+            return (
+                f"\nShared team files (File Repo) are in {host_tf}/\n"
+                f"  - It's a folder in your workspace — use the relative path "
+                f"{_TEAM_FILES_SUBDIR}/ with your normal tools.\n"
+            )
         docker_tf = f"{_DOCKER_WORKSPACE}/{_TEAM_FILES_SUBDIR}"
         return (
             f"\nShared team files (File Repo, mounted at {docker_tf}/):\n"
@@ -2473,19 +3100,34 @@ def create_app(
             f"host macOS paths do not exist inside Docker.\n"
         )
 
-    def _workspace_path_note(ws: Path, *, include_task_hint: bool = False) -> str:
-        """Standard workspace path hint prepended to agent messages."""
-        docker_ws = _DOCKER_WORKSPACE
-        lines = [
-            f"[Workspace: all tools run inside Docker — use {docker_ws}/ paths.",
-            f"  - Workspace root: {docker_ws}/",
-        ]
+    def _workspace_path_note(ws: Path, *, include_task_hint: bool = False,
+                             is_claude: bool = False) -> str:
+        """Standard workspace path hint prepended to agent messages.
+
+        Hermes agents run their tools inside Docker, so they get ``/workspace``
+        paths. The Claude Code agent runs on the host with this directory as its
+        cwd and uses its own native tools (Read/Edit/Bash/…) — give it a plain
+        host-path note with no Docker or Hermes-tool references."""
+        if is_claude:
+            lines = [
+                f"[Workspace: your working directory is {ws}",
+                "  - You're already in it right now — run `pwd`/`ls` to see where "
+                "you are; don't assume a hard-coded /workspace path.",
+                "  - You are running on the host (not in a container); relative "
+                "paths resolve here. Use your normal tools (Read, Edit, Bash, …).",
+            ]
+        else:
+            docker_ws = _DOCKER_WORKSPACE
+            lines = [
+                f"[Workspace: all tools run inside Docker — use {docker_ws}/ paths.",
+                f"  - Workspace root: {docker_ws}/",
+            ]
         if include_task_hint:
             lines.append(
                 "Your task is provided below — start working on it immediately "
                 "without reading any files first."
             )
-        team_note = _team_files_note(ws)
+        team_note = _team_files_note(ws, is_claude=is_claude)
         if team_note:
             lines.append(team_note.strip())
         lines.append("]")
@@ -2725,6 +3367,15 @@ def create_app(
 
     def _agent_runtime_info(agent_id: str, ws: Path | None = None) -> dict:
         """Model routing for a profile (for API / UI display)."""
+        if _is_claude_agent(agent_id):
+            model = ""
+            if ws is not None:
+                try:
+                    model = (ws / ".claude_model").read_text(encoding="utf-8").strip()
+                except OSError:
+                    pass
+            return {"agent": agent_id, "agent_model": model or "Claude default",
+                    "agent_base_url": "claude-agent-sdk"}
         try:
             pdir = resolve_agent_profile_dir(cfg.agent_profiles_dir, home, agent_id)
         except (ValueError, FileNotFoundError):
@@ -2742,12 +3393,21 @@ def create_app(
         return {"agent": agent_id, "agent_model": model, "agent_base_url": base_url}
 
     def _apply_desk_model_marker(env: dict, ws: Path, agent_id: str, model: str) -> None:
-        """Apply a per-desk model override (Ollama or vLLM/OpenAI-compat)."""
+        """Apply a per-desk model override.
+
+        Claude desks pin the model via ``.claude_model`` + ``CLAUDE_AGENT_MODEL`` (the
+        Claude worker reads those and ignores HERMES_MODEL); every other desk uses
+        ``.hermes_model`` + ``HERMES_MODEL`` (Ollama or vLLM/OpenAI-compat)."""
         if not model:
             return
-        env["HERMES_MODEL"] = model
+        if _is_claude_agent(agent_id):
+            env["CLAUDE_AGENT_MODEL"] = model
+            marker = ".claude_model"
+        else:
+            env["HERMES_MODEL"] = model
+            marker = ".hermes_model"
         try:
-            (ws / ".hermes_model").write_text(model, encoding="utf-8")
+            (ws / marker).write_text(model, encoding="utf-8")
         except OSError:
             pass
 
@@ -2829,8 +3489,43 @@ def create_app(
             return await _resolve_gui_model(model, hermes_cfg_base, ollama_root)
         return _EFFECTIVE_MODEL or ""
 
+    def _apply_claude_agent_env(env: dict, ws: Path, agent_id: str) -> None:
+        """Configure a desk to run the Claude Code agent (Claude Agent SDK).
+
+        Claude does NOT use Hermes' layered config/profile dir — it resolves its own
+        model, tools, and auth. We only stamp the agent KIND (so ``_worker_cmd`` picks
+        the Claude worker), the model alias, the permission mode, and the profile
+        marker so resume keeps treating this desk as Claude."""
+        env["HERMES_GUI_AGENT_KIND"] = "claude"
+        env["HERMES_GUI_AGENT"] = agent_id
+        env.setdefault("CLAUDE_AGENT_PERMISSION_MODE", "bypassPermissions")
+        try:
+            m = (ws / ".claude_model").read_text(encoding="utf-8").strip()
+        except OSError:
+            m = ""
+        if m:
+            env["CLAUDE_AGENT_MODEL"] = m
+        else:
+            env.pop("CLAUDE_AGENT_MODEL", None)
+        # Force this Claude SDK desk onto OAuth / `claude /login` subscription auth —
+        # an inherited ANTHROPIC_API_KEY (or gateway/cloud cred) would otherwise
+        # shadow it (precedence: API key > OAuth token > /login). Scoped to the Claude
+        # SDK desk; Hermes-on-Claude-API desks (read_profile_env) are unaffected.
+        _scrub_claude_oauth_only(env)
+        try:
+            (ws / ".hermes_profile").write_text(agent_id, encoding="utf-8")
+        except OSError:
+            pass
+
+    def _desk_is_claude(sid: str) -> bool:
+        """True if this desk's saved agent is the Claude Code agent."""
+        return _is_claude_agent(_load_agent_marker(_find_workspace(sid)) or "")
+
     def _apply_agent_profile(env: dict, ws: Path, agent_id: str) -> None:
         """Point worker at a Hermes profile dir; profile config owns model/base_url."""
+        if _is_claude_agent(agent_id):
+            _apply_claude_agent_env(env, ws, agent_id)
+            return
         try:
             pdir = resolve_agent_profile_dir(cfg.agent_profiles_dir, home, agent_id)
         except ValueError as exc:
@@ -2860,6 +3555,14 @@ def create_app(
         except OSError:
             pass
         marker = ws / ".hermes_profile"
+        if _is_claude_agent(agent_id):
+            # Claude has no Hermes profile dir to resolve — just record the marker.
+            try:
+                marker.write_text(agent_id, encoding="utf-8")
+            except OSError:
+                pass
+            _append_profile_history(ws, agent_id)
+            return
         if agent_id:
             try:
                 resolve_agent_profile_dir(cfg.agent_profiles_dir, home, agent_id)
@@ -2930,6 +3633,10 @@ def create_app(
         ws = _find_workspace(sid)
         d["task_solved"] = bool(ws and (ws / _SOLVED_MARKER).exists())
         d["workspace_path"] = str(ws) if ws else None
+        # Expose the desk's team (from its .hermes_team_id marker) so the frontend can
+        # reconstruct teams it doesn't have locally — e.g. desks created via the API /
+        # a script, which never went through the browser's localStorage team flow.
+        d["team_id"] = _load_desk_team_id(ws) if ws else None
         d["is_sleeping"] = sid in _session_sleeping
         agent = _load_agent_marker(ws)
         if agent:
@@ -2948,7 +3655,69 @@ def create_app(
                 d["agent_model"] = model
         if ws and (ws / ".hermes_tools").is_file():
             d["desk_tools"] = _load_desk_tools_enabled(ws)
+        # Activity span (first command → last activity) across the whole desk
+        # lineage, same bounds the Overview chart uses. Lets the desk-card timer
+        # show actual execution time instead of wall-clock-since-spawn, so an idle
+        # desk freezes at its last activity rather than counting overnight hours.
+        first_at, last_at = db.get_desk_time_bounds(sid)
+        if first_at:
+            d["first_activity_at"] = first_at
+        if last_at:
+            d["last_activity_at"] = last_at
         return d
+
+    # Claude desks have no Hermes state.db, so db.list_sessions() can't see them.
+    # We synthesize a Session-shaped entry from the on-disk markers + live process
+    # state so the desk renders and streams. (No DB → no persisted history; this is
+    # the agreed MVP tradeoff.) Tracked only for desks live in this server process.
+    def _claude_desk_ids() -> "list[str]":
+        ids = {sid for sid in (set(_session_workspaces) | set(_persistent_procs)
+                               | set(_running_procs)) if _desk_is_claude(sid)}
+        # Discover on disk too, so Claude desks survive a server restart (no state.db
+        # to enumerate them like Hermes desks). Reads one marker per unknown desk.
+        try:
+            for d in (home / "gui_sandboxes").iterdir():
+                if not d.is_dir() or d.name in ids:
+                    continue
+                marker = d / "docker" / "default" / "workspace" / ".hermes_profile"
+                try:
+                    if marker.is_file() and _is_claude_agent(marker.read_text(encoding="utf-8")):
+                        ids.add(d.name)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        return list(ids)
+
+    def _claude_desk_title(ws: Path) -> str:
+        try:
+            for line in (ws / "TASK.md").read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    return s[:120]
+        except OSError:
+            pass
+        return ""
+
+    def _claude_desk_stub(sid: str) -> "dict | None":
+        ws = _find_workspace(sid)
+        if ws is None or not _is_claude_agent(_load_agent_marker(ws) or ""):
+            return None
+        try:
+            started = (datetime.strptime(sid[:15], "%Y%m%d_%H%M%S")
+                       .replace(tzinfo=timezone.utc).isoformat())
+        except ValueError:
+            started = datetime.now(timezone.utc).isoformat()
+        try:
+            model = (ws / ".claude_model").read_text(encoding="utf-8").strip()
+        except OSError:
+            model = ""
+        return _enrich_session({
+            "id": sid, "started_at": started, "ended_at": None,
+            "source": "workbench", "model": model, "parent_session_id": None,
+            "title": _load_persisted_title(sid) or _claude_desk_title(ws) or "Claude task",
+            "message_count": 0, "token_estimate": 0,
+        })
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
@@ -2957,7 +3726,12 @@ def create_app(
         limit = max(1, min(limit, 500))
         offset = max(0, offset)
         sessions = db.list_sessions(limit=limit, offset=offset)
-        return [_enrich_session(asdict(s)) for s in sessions]
+        out = [_enrich_session(asdict(s)) for s in sessions]
+        seen = {d["id"] for d in out}
+        claude = [stub for sid in _claude_desk_ids() if sid not in seen
+                  for stub in (_claude_desk_stub(sid),) if stub is not None]
+        claude.sort(key=lambda d: d.get("started_at", ""), reverse=True)
+        return claude + out
 
     @app.get("/api/sessions/saved")
     def list_saved_desks():
@@ -2983,9 +3757,12 @@ def create_app(
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str):
         s = db.get_session(session_id)
-        if not s:
-            raise HTTPException(404, "Session not found")
-        return _enrich_session(asdict(s))
+        if s:
+            return _enrich_session(asdict(s))
+        stub = _claude_desk_stub(session_id)  # DB-free Claude desk
+        if stub:
+            return stub
+        raise HTTPException(404, "Session not found")
 
     @app.patch("/api/sessions/{session_id}/desk-config")
     async def patch_session_desk_config(session_id: str, body: dict):
@@ -3011,15 +3788,29 @@ def create_app(
                         raise HTTPException(500, str(exc)) from exc
 
         if "model" in body:
+            aid_model = _load_agent_marker(ws) or ""
+            is_claude_desk = _is_claude_agent(aid_model)
             model = (body.get("model") or "").strip()
-            mf = ws / ".hermes_model"
+            if is_claude_desk:
+                model = _claude_model(model)        # only opus/sonnet/haiku/claude-*
+            marker = ws / (".claude_model" if is_claude_desk else ".hermes_model")
+            prev_model = ""
+            try:
+                prev_model = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
             if model:
-                _apply_desk_model_marker({}, ws, _load_agent_marker(ws) or "", model)
+                _apply_desk_model_marker({}, ws, aid_model, model)
             else:
                 try:
-                    mf.unlink(missing_ok=True)
+                    marker.unlink(missing_ok=True)
                 except OSError:
                     pass
+            # A Claude desk's warm worker pins the model in-process at spawn, so the
+            # change only lands once it restarts — terminate it (as agent/tool changes
+            # already do) so the next turn runs on the newly chosen model.
+            if is_claude_desk and model != prev_model:
+                restart_worker = True
 
         if "tools" in body:
             tools = body.get("tools")
@@ -3035,9 +3826,12 @@ def create_app(
             await _terminate_session_workers(session_id)
 
         s = db.get_session(session_id)
-        if not s:
-            raise HTTPException(404, "Session not found")
-        return _enrich_session(asdict(s))
+        if s:
+            return _enrich_session(asdict(s))
+        stub = _claude_desk_stub(session_id)   # DB-free Claude desk (no state.db row)
+        if stub:
+            return stub
+        raise HTTPException(404, "Session not found")
 
     @app.get("/api/sessions/{session_id}/activity")
     def get_activity(session_id: str, limit: int = 1_000_000, tail: bool = False):
@@ -3081,14 +3875,23 @@ def create_app(
                 sid_msgs = db.get_desk_messages(sid, limit=limit)
             else:
                 sid_msgs = db.get_messages(sid, limit=limit)
-            if not sid_msgs:
-                continue
-            messages.extend(sid_msgs)
             evts = parse_activity(sid_msgs)
             _apply_real_times(evts, sid)
             for inner_sid in {m.session_id for m in sid_msgs}:
                 if inner_sid != sid:
                     _apply_real_times(evts, inner_sid)
+            # Fold in this desk's interrupted/errored turns (the orphan feed) so a
+            # run that was stopped half-way isn't a blank gap on the chart — the
+            # same per-desk merge the Feed uses. Orphans already carry real exact
+            # times, so they land at their true spot (and the per-desk scope keeps
+            # the workspace-lineage merge from pooling one desk's turns into
+            # another — DESK_ISOLATION_AUDIT). Runs even when sid_msgs is empty, so
+            # a desk whose only turn was interrupted (nothing committed to the DB)
+            # still charts.
+            evts = _merge_orphan_feed(evts, sid, _find_workspace(sid))
+            if not evts:
+                continue
+            messages.extend(sid_msgs)
             events.extend(evts)
         events.sort(key=lambda e: db._timestamp_sort_key(e.timestamp))
         if len(events) > limit:
@@ -3110,8 +3913,14 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}/console")
     def get_console(session_id: str, limit: int = 2000):
-        """Rebuild the Agent Console (shell I/O) from the DB so reopening a past
-        session shows command output instead of an empty panel."""
+        """Restore the Agent Console (clean shell I/O) when a desk is reopened.
+
+        Prefer the persisted on-disk log: it holds the FULL verbatim stream of every
+        turn — including interrupted turns that never reach Hermes' DB. Fall back to
+        a DB reconstruction for desks that haven't streamed under this server yet."""
+        logged = _read_desk_log(session_id, "console")
+        if logged:
+            return {"text": logged}
         limit = max(1, min(limit, 5000))
         # Read the whole desk db (all session ids across resumes), matching the
         # Activity overview — a session-scoped read would drop prior runs and
@@ -3124,7 +3933,13 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}/terminal")
     def get_terminal(session_id: str, limit: int = 2000):
-        """Rebuild the Debug terminal stream from the DB for reopened sessions."""
+        """Rebuild the Debug terminal stream for reopened sessions.
+
+        Prefer the persisted on-disk log (full verbatim history, incl. interrupted
+        turns); fall back to a DB reconstruction when no log exists yet."""
+        logged = _read_desk_log(session_id, "terminal")
+        if logged:
+            return {"text": logged}
         limit = max(1, min(limit, 5000))
         # Whole-desk read (see get_console) so the Debug terminal restores every
         # prior run's output after a page refresh, not just the current session.
@@ -3226,15 +4041,20 @@ def create_app(
         _session_audit_best.pop(sid, None)
         _session_title_tokens.pop(sid, None)
         _session_event_times.pop(sid, None)
+        _event_times_loaded.discard(sid)
         _session_autocontinue.pop(sid, None)
         _session_continue_count.pop(sid, None)
         _session_user_stopped.discard(sid)
         _live_queues.pop(sid, None)
         _live_event_buffer.pop(sid, None)
         _orphan_feed_events.pop(sid, None)
+        _subagent_records.pop(sid, None)
         _session_turn_interrupted.discard(sid)
         _terminal_queues.pop(sid, None)
         _console_queues.pop(sid, None)
+        _console_turn_buf.pop(sid, None)
+        _terminal_turn_buf.pop(sid, None)
+        _log_seeded.discard(sid)
         _turn_done_events.pop(sid, None)
         tid = _session_team.pop(sid, None)
         if tid and tid in _team_sessions:
@@ -3458,7 +4278,9 @@ def create_app(
 
         Resolves the profile's model / base_url / provider / API key from its
         config.yaml + .env. Ollama models are num_ctx-capped; Gemini is routed
-        through its OpenAI-compat endpoint with a Bearer key. Empty id → default.
+        through its OpenAI-compat endpoint with a Bearer key; the native `claude`
+        profile keeps api.anthropic.com + ANTHROPIC_API_KEY for the Messages
+        transport (see _anthropic_aux_chat). Empty id → default.
         """
         global _MANAGER_PROFILE, _MGR_BASE_URL, _MGR_MODEL, _MGR_MODEL_DISPLAY
         global _MGR_API_KEY, _MGR_PROVIDER
@@ -3473,12 +4295,19 @@ def create_app(
             provider = read_profile_provider(pdir)
             env = read_profile_env(pdir)
             gemini = is_gemini_backend(base_url, provider)
+            anthropic = _is_native_anthropic_provider(provider)
             chat_base = base_url.rstrip("/")
             api_key = ""
             if gemini:
                 # Gemini exposes an OpenAI-compatible surface under /openai.
                 chat_base = f"{chat_base}/openai"
                 api_key = env.get("GEMINI_API_KEY", "")
+            elif anthropic:
+                # The `claude` profile uses the Anthropic Messages API (x-api-key,
+                # /v1/messages) — aux calls route through _anthropic_aux_chat. Keep
+                # the bare api.anthropic.com root and read its ANTHROPIC_API_KEY.
+                chat_base = chat_base or "https://api.anthropic.com"
+                api_key = env.get("ANTHROPIC_API_KEY") or env.get("API_KEY") or ""
             elif not is_ollama_backend(base_url, provider):
                 api_key = env.get("OPENAI_API_KEY") or env.get("API_KEY") or ""
             eff_model = model
@@ -3513,7 +4342,6 @@ def create_app(
         cfg_path = home / "config.yaml"
         cfg_model = ""
         cfg_base_url = ""
-        cfg_provider = ""
         if cfg_path.exists():
             try:
                 with open(cfg_path) as f:
@@ -3521,31 +4349,13 @@ def create_app(
                 m = hermes_cfg.get("model", {}) or {}
                 cfg_model = m.get("default", "")
                 cfg_base_url = m.get("base_url", "")
-                cfg_provider = m.get("provider", "") or ""
             except Exception:
                 pass
         ollama_url = _ollama_url_from_cfg()
 
-        global _EFFECTIVE_MODEL, _AUX_MODEL
+        global _EFFECTIVE_MODEL
         if cfg_model:
             _EFFECTIVE_MODEL = await _resolve_gui_model(cfg_model, cfg_base_url, ollama_url)
-
-        # Aux model for titles/judge/progress — only query Ollama tags when Ollama is in use.
-        aux_pref = os.environ.get("HERMES_GUI_AUX_MODEL", "")
-        installed: set[str] = set()
-        if is_ollama_backend(cfg_base_url, cfg_provider):
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    tags = (await client.get(f"{ollama_url}/api/tags")).json()
-                    installed = {m.get("name", "") for m in tags.get("models", [])}
-            except Exception:
-                installed = set()
-        if aux_pref:
-            _AUX_MODEL = await _resolve_gui_model(aux_pref, cfg_base_url, ollama_url)
-        elif installed and "qwen3.5:4b" in installed and cfg_model != "qwen3.5:4b":
-            _AUX_MODEL = await _ensure_capped_model("qwen3.5:4b", ollama_url)
-        else:
-            _AUX_MODEL = _EFFECTIVE_MODEL
 
         # Persisted manager profile selection (UI gear). Empty = default backend.
         try:
@@ -3803,7 +4613,7 @@ def create_app(
                "HERMES_WRITE_SAFE_ROOT": str(workspace_dir),
                "TERMINAL_CWD": str(workspace_dir),
                "HERMES_GUI_NUM_CTX": _NUM_CTX, "HERMES_GUI_LEAN_TOOLS": _LEAN_TOOLS,
-               **_DESK_DOCKER_ENV}
+               **_DESK_DOCKER_ENV, **_GPU_ENV}
         _sb = _sandbox_base_of(Path(workspace_dir))
         if _sb:
             env["TERMINAL_SANDBOX_DIR"] = str(_sb)
@@ -3884,11 +4694,11 @@ def create_app(
                 await _terminate_session_workers(session_id)
                 proc = None
         if proc is None or proc.returncode is not None:
-            venv_py = str(_HERMES_VENV_PY)
-            if not Path(venv_py).exists():
-                venv_py = shutil.which("python3") or "python3"
-            args = [venv_py, str(_WORKER_SCRIPT), "--persistent"]
-            if resume_id:
+            py, script = _worker_cmd(env)
+            args = [py, script, "--persistent"]
+            # Claude's warm worker keeps context in-process; the GUI session id is NOT
+            # a valid Claude SDK session id, so never hand it over as --resume.
+            if resume_id and env.get("HERMES_GUI_AGENT_KIND") != "claude":
                 args.append(resume_id)
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -3928,11 +4738,9 @@ def create_app(
         env, workspace_dir = _session_env(sid, reasoning_effort, api_mode)
         if images:
             env = {**env, "HERMES_GUI_RESUME_IMAGES": json.dumps(images)}
-        venv_py = str(_HERMES_VENV_PY)
-        if not Path(venv_py).exists():
-            venv_py = shutil.which("python3") or "python3"
+        py, script = _worker_cmd(env)
         proc = await asyncio.create_subprocess_exec(
-            venv_py, str(_WORKER_SCRIPT), "--resume", sid, content,
+            py, script, "--resume", sid, content,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_dir,
@@ -4000,12 +4808,14 @@ def create_app(
             if tid:
                 _register_session_team(sid, tid, ws)
                 _prepare_team_files_mount(tid, ws)
+        is_claude_desk = _is_claude_agent(_load_agent_marker(ws) or "") if ws else False
         if ws and attachments:
-            _, attach_note = _save_attachments(attachments, ws)
+            _, attach_note = _save_attachments(attachments, ws, is_claude=is_claude_desk)
             if attach_note:
                 content = attach_note.strip() + "\n\n" + content
         # Re-inject workspace paths + image reminders so context compression can't
-        # lose the file references the agent needs to call vision_analyze correctly.
+        # lose the file references the agent needs (vision_analyze for Hermes, the
+        # Read tool for Claude).
         if ws and not is_manager:
             _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
             try:
@@ -4013,12 +4823,11 @@ def create_app(
                           if p.is_file() and p.suffix.lower() in _IMAGE_EXTS]
             except Exception:
                 images = []
-            docker_ws = _DOCKER_WORKSPACE
-            header = _workspace_path_note(ws).rstrip("]")
+            header = _workspace_path_note(ws, is_claude=is_claude_desk).rstrip("]")
             if images:
-                header += (
-                    f"\n  - vision_analyze on workspace images (host path):"
-                )
+                header += ("\n  - Attached images in your workspace (open with the Read tool):"
+                           if is_claude_desk else
+                           "\n  - vision_analyze on workspace images (host path):")
                 for img in images[:10]:
                     header += f"\n    - {img}"
             header += "\n]"
@@ -4030,7 +4839,7 @@ def create_app(
         # blocks (the model sees pixels, not just a path hint).
         img_payloads = [{"name": a.get("name", ""), "data": a.get("data", "")}
                         for a in (attachments or []) if a.get("data")]
-        if _PERSISTENT_WORKERS:
+        if _PERSISTENT_WORKERS or _desk_is_claude(sid):
             env, _ = _session_env(sid, reasoning_effort, api_mode)
             await _run_turn(sid, content, env=env, resume_id=sid, interrupting=False,
                             images=img_payloads or None)
@@ -4068,12 +4877,14 @@ def create_app(
         # Save any attached images to workspace before interrupting.
         ws = _find_workspace(session_id)
         if ws and attachments:
-            _, attach_note = _save_attachments(attachments, ws)
+            _, attach_note = _save_attachments(
+                attachments, ws,
+                is_claude=_is_claude_agent(_load_agent_marker(ws) or ""))
             if attach_note:
                 content = attach_note.strip() + "\n\n" + content
         img_payloads = [{"name": a.get("name", ""), "data": a.get("data", "")}
                         for a in attachments if a.get("data")]
-        if _PERSISTENT_WORKERS:
+        if _PERSISTENT_WORKERS or _desk_is_claude(session_id):
             env, _ = _session_env(session_id, reasoning_effort, api_mode)
             await _run_turn(session_id, content, env=env, resume_id=session_id, interrupting=True,
                             images=img_payloads or None)
@@ -4203,7 +5014,14 @@ def create_app(
         """Save EVERYTHING about one desk to a downloadable .tar.gz: the entire
         sandbox (private state.db = session history + model calls, the workspace
         snapshot, run/profile history, and all markers), plus a manifest. Like a
-        Snapshot, but for a single desk — restore it later via /import."""
+        Snapshot, but for a single desk — restore it later via /import.
+
+        The desk's team files live at ``workspace/team_files`` — normally a
+        symlink into the shared ``gui_team_repos/<team_id>/`` store, which tar
+        would save as a (soon-dangling) symlink, losing the files. So we follow
+        the symlink and bundle its real files at ``workspace/team_files/``, so a
+        loaded desk keeps the team files in its own workspace and sees them on
+        the next resume."""
         base, ws = _desk_paths(session_id)
         if not base.exists():
             raise HTTPException(404, "Desk sandbox not found")
@@ -4216,14 +5034,32 @@ def create_app(
             "profile": (_load_agent_marker(ws) or "") if ws.exists() else "",
             "team_id": (_load_desk_team_id(ws) if ws.exists() else None),
         }
+        # team_files is a symlink to the shared repo (or, for an already-loaded
+        # archive, a plain dir). Drop the whole subtree from the recursive add and
+        # re-add its dereferenced contents, so the archive holds the real files —
+        # exactly once — at workspace/team_files/.
+        team_files_arc = "sandbox/" + os.path.relpath(
+            ws / _TEAM_FILES_SUBDIR, base,
+        ).replace(os.sep, "/")
+
+        def _drop_team_files(ti: tarfile.TarInfo):
+            n = ti.name
+            return None if n == team_files_arc or n.startswith(team_files_arc + "/") else ti
+
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             data = json.dumps(manifest, indent=2).encode("utf-8")
             info = tarfile.TarInfo("desk_manifest.json")
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
-            # The whole sandbox dir under "sandbox/" (recursive, files + dirs).
-            tar.add(str(base), arcname="sandbox", recursive=True)
+            # Whole sandbox under "sandbox/" (recursive), minus the team_files
+            # subtree (re-added below as the symlink's real, dereferenced files).
+            tar.add(str(base), arcname="sandbox", recursive=True, filter=_drop_team_files)
+            team_files = ws / _TEAM_FILES_SUBDIR
+            if team_files.exists():  # follows the symlink; False if dangling
+                target = team_files.resolve()
+                if target.is_dir() and any(target.iterdir()):
+                    tar.add(str(target), arcname=team_files_arc, recursive=True)
         buf.seek(0)
         return StreamingResponse(
             buf, media_type="application/gzip",
@@ -4280,10 +5116,30 @@ def create_app(
         desk_id = str(manifest.get("desk_id", "")).strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]+", desk_id):
             raise HTTPException(400, "Desk archive has an invalid desk id")
-        base, _ws = _desk_paths(desk_id)
+        base, ws = _desk_paths(desk_id)
         if base.exists():
             raise HTTPException(409, f"Desk {desk_id} is already loaded — delete it first")
+        # An archive saved with team files carries them as a real
+        # sandbox/.../workspace/team_files/ tree (the symlink was dereferenced on
+        # save). Those bytes are the desk's own copy now: extracting them leaves a
+        # plain team_files/ folder the resumed desk reads directly.
+        team_files_arc = "sandbox/" + os.path.relpath(
+            ws / _TEAM_FILES_SUBDIR, base,
+        ).replace(os.sep, "/")
+        bundled_team_files = any(
+            m.name == team_files_arc or m.name.startswith(team_files_arc + "/")
+            for m in tar.getmembers()
+        )
         _safe_extract_desk_archive(tar, base)
+        if bundled_team_files:
+            # Detach from the shared team repo so the bundled files (a real
+            # workspace/team_files/ dir) aren't shadowed by the team's Docker
+            # bind-mount of gui_team_repos/<team_id>/ at /workspace/team_files.
+            manifest["team_id"] = None
+            try:
+                (ws / _DESK_TEAM_MARKER).unlink()
+            except OSError:
+                pass
         return _finish_desk_import(desk_id, manifest)
 
     def _saved_desks_dir() -> Path:
@@ -4311,7 +5167,9 @@ def create_app(
         """Load a desk saved by /archive: unpack its sandbox under the original
         desk id and re-register it. The desk's session ids reference its dir, so
         it's restored under its original id; if one already exists, refuse (delete
-        it first) rather than silently overwrite."""
+        it first) rather than silently overwrite. Any bundled team files come back
+        as a plain workspace/team_files/ folder owned by this desk (it loads
+        detached from the original shared team repo)."""
         raw = await file.read()
         if len(raw) > _MAX_DESK_ARCHIVE_BYTES:
             raise HTTPException(413, "Desk archive too large")
@@ -4589,6 +5447,16 @@ def create_app(
         reasoning_effort = body.get("reasoning_effort", "")
         api_mode         = body.get("api_mode", "")
         agent_id         = (body.get("agent") or body.get("profile") or "").strip().lower()
+        if not agent_id and _DEFAULT_AGENT:
+            agent_id = _DEFAULT_AGENT   # only when AGENT_GUI_DEFAULT_AGENT is set
+        if _is_claude_agent(agent_id) and not experimental:
+            # The Claude Code SDK agent is gated behind --experimental; refuse to
+            # spawn one otherwise (defense in depth — the roster already hides it).
+            raise HTTPException(
+                403,
+                "The Claude Code SDK agent is an experimental feature. Restart the "
+                "server with --experimental (e.g. ./start.sh --experimental) to enable it.",
+            )
         team_id          = (body.get("team_id") or "").strip()
         attachments      = body.get("attachments", [])
         # Optional per-desk toolset profile: `tools` is the ENABLED toolset list
@@ -4597,11 +5465,15 @@ def create_app(
         tools_enabled    = body.get("tools")
         if tools_enabled is not None and not isinstance(tools_enabled, list):
             raise HTTPException(400, "tools must be a list of toolset names")
-        if tools_enabled is None and agent_id:
+        if tools_enabled is None and agent_id and not _is_claude_agent(agent_id):
             tools_enabled = _profile_default_tools_enabled(cfg.agent_profiles_dir, home, agent_id)
 
         raw_model = (body.get("model") or "").strip()
-        if agent_id:
+        if _is_claude_agent(agent_id):
+            # Claude model alias ("opus"/"sonnet"/"haiku") or full id only; drop a
+            # non-Claude model (e.g. the GUI's Ollama default) so it never reaches the SDK.
+            model = _claude_model(raw_model)
+        elif agent_id:
             model = await _resolve_desk_model(agent_id, raw_model)
         elif raw_model:
             model = await _resolve_desk_model("", raw_model)
@@ -4655,22 +5527,22 @@ def create_app(
             _register_session_team(session_id, team_id, workspace_dir)
             _prepare_team_files_mount(team_id, workspace_dir)
 
+        is_claude_desk = _is_claude_agent(agent_id)
         image_note = ""
         if saved_images:
             image_note = (
+                "\nAttached images saved to your workspace — open them with the Read tool:\n"
+                if is_claude_desk else
                 "\nAttached images saved to workspace "
                 f"(vision_analyze host path: {workspace_dir}/<filename>):\n"
             )
             for p in saved_images:
                 image_note += f"  - {p}\n"
-        path_header = _workspace_path_note(workspace_dir, include_task_hint=True).rstrip("]")
+        path_header = _workspace_path_note(
+            workspace_dir, include_task_hint=True, is_claude=is_claude_desk).rstrip("]")
         augmented_content = (
             f"{path_header}{image_note}]\n\n{content}"
         )
-
-        venv_py = str(_HERMES_VENV_PY)
-        if not Path(venv_py).exists():
-            venv_py = shutil.which("python3") or "python3"
 
         # Pass the pre-assigned session_id and per-session overrides to the worker.
         # TERMINAL_SANDBOX_DIR isolates this desk's Docker /workspace from others.
@@ -4682,13 +5554,22 @@ def create_app(
                "TERMINAL_CWD": str(workspace_dir),
                "HERMES_GUI_NUM_CTX": _NUM_CTX,
                "HERMES_GUI_LEAN_TOOLS": _LEAN_TOOLS,
-               **_DESK_DOCKER_ENV}
+               **_DESK_DOCKER_ENV, **_GPU_ENV}
         if api_mode:
             env["HERMES_API_MODE"] = api_mode
         _apply_toolset_profile(env, tools_enabled if isinstance(tools_enabled, list) else None)
         if agent_id:
             _apply_agent_profile(env, workspace_dir, agent_id)
-        if model:
+        if _is_claude_agent(agent_id):
+            # Claude desk: persist the chosen model alias for resume and set it for
+            # this first turn. Skips the Hermes profile-model pin logic below.
+            try:
+                if model:
+                    (workspace_dir / ".claude_model").write_text(model, encoding="utf-8")
+                    env["CLAUDE_AGENT_MODEL"] = model
+            except OSError:
+                pass
+        elif model:
             env["HERMES_MODEL"] = model
             # Pin .hermes_model ONLY when the user explicitly chose a model different
             # from the profile's configured default. A plain default echo is NOT
@@ -4733,12 +5614,15 @@ def create_app(
         except Exception:
             pass
 
-        if _PERSISTENT_WORKERS:
-            # Spawn the desk's long-lived worker and run the first turn on it.
+        if _PERSISTENT_WORKERS or _is_claude_agent(agent_id):
+            # Spawn the desk's long-lived worker and run the first turn on it. Claude
+            # desks ALWAYS use this path: the warm ClaudeSDKClient retains conversation
+            # context across turns in-process (no DB-backed resume needed for the MVP).
             await _run_turn(session_id, augmented_content, env=env, resume_id=None, interrupting=False)
         else:
+            py, script = _worker_cmd(env)
             proc = await asyncio.create_subprocess_exec(
-                venv_py, str(_WORKER_SCRIPT), augmented_content,
+                py, script, augmented_content,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(workspace_dir),
@@ -4843,7 +5727,13 @@ def create_app(
             return
 
         tq: asyncio.Queue = asyncio.Queue()
-        _terminal_queues.setdefault(session_id, []).append(tq)
+        _terminal_queues.setdefault(session_id, []).append(tq)   # capture live first…
+        replay = _turn_log_text(session_id, "terminal")          # …then the in-flight turn
+        if replay:
+            try:
+                await websocket.send_text(replay)
+            except Exception:
+                pass
         try:
             while True:
                 try:
@@ -4883,7 +5773,13 @@ def create_app(
         """Clean shell I/O only — no agent chatter, no tool metadata."""
         await websocket.accept()
         cq: asyncio.Queue = asyncio.Queue()
-        _console_queues.setdefault(session_id, []).append(cq)
+        _console_queues.setdefault(session_id, []).append(cq)   # capture live first…
+        replay = _turn_log_text(session_id, "console")          # …then the in-flight turn
+        if replay:
+            try:
+                await websocket.send_text(replay)
+            except Exception:
+                pass
         try:
             while True:
                 try:
@@ -5056,10 +5952,28 @@ def create_app(
         with open(cfg_path) as f:
             return yaml.safe_load(f) or {}
 
+    def _roster_agents() -> "list[dict]":
+        """Desk-assignable agents: the built-in Claude card + installed Hermes
+        profiles. Shared by /api/agents AND /api/gui-config — the roster reads
+        gui-config, so both must serve the same list or the Claude card silently
+        goes missing from the picker.
+
+        The Claude Code SDK card is an experimental/developmental feature: it is
+        offered only when the server is started with --experimental (see
+        create_app). Otherwise the roster lists the stable Hermes profiles only."""
+        profiles = list_agents(cfg.agent_profiles_dir, home)
+        if experimental:
+            return [dict(_CLAUDE_AGENT_CARD), *profiles]
+        # Gated off: withhold the built-in card AND any installed profile whose id
+        # collides with the Claude agent id — _is_claude_agent routes those to the
+        # SDK worker and desk creation refuses them, so don't offer what we won't
+        # spawn.
+        return [a for a in profiles if not _is_claude_agent(a.get("id", ""))]
+
     @app.get("/api/agents")
     def get_agents():
-        """Hermes agent profiles available for desk assignment."""
-        return {"agents": list_agents(cfg.agent_profiles_dir, home)}
+        """Agent profiles available for desk assignment (Claude built-in + Hermes)."""
+        return {"agents": _roster_agents()}
 
     @app.get("/api/agents/prototypes")
     def get_agent_prototypes():
@@ -5069,6 +5983,12 @@ def create_app(
     @app.get("/api/agents/{agent_id}/capabilities")
     def get_agent_capabilities(agent_id: str):
         """Tool presets (chat/lean/full) and skill bundles for bench preview."""
+        if _is_claude_agent(agent_id):
+            # Claude uses its own built-in tools (bypassPermissions); Hermes toolset
+            # presets don't apply, so report none.
+            return {"id": agent_id, "presets": {"chat": [], "lean": [], "full": []},
+                    "source": "global", "default_preset": "chat",
+                    "profile_disabled_toolsets": [], "skill_bundles": [], "skill_count": 0}
         try:
             pdir = resolve_agent_profile_dir(cfg.agent_profiles_dir, home, agent_id)
         except (ValueError, FileNotFoundError) as exc:
@@ -5078,6 +5998,11 @@ def create_app(
 
     @app.get("/api/agents/{agent_id}/persona")
     def get_agent_persona(agent_id: str):
+        if _is_claude_agent(agent_id):
+            return {"id": agent_id, "profile_path": "", "is_prototype": False,
+                    "clone_from": None, "name": _CLAUDE_AGENT_CARD["name"],
+                    "tagline": _CLAUDE_AGENT_CARD["tagline"], "model": "",
+                    "base_url": "claude-agent-sdk", "soul": "", "memory": ""}
         try:
             pdir = resolve_agent_profile_dir(cfg.agent_profiles_dir, home, agent_id)
         except (ValueError, FileNotFoundError) as exc:
@@ -5209,7 +6134,7 @@ def create_app(
         return {
             "hermes_home": str(home),
             "agent_profiles_dir": str(cfg.agent_profiles_dir),
-            "agents": list_agents(cfg.agent_profiles_dir, home),
+            "agents": _roster_agents(),
             "prototypes": list_prototypes(cfg.agent_profiles_dir, home),
             "desk_default_model": _EFFECTIVE_MODEL or None,
             "global": {
@@ -5328,6 +6253,13 @@ def create_app(
         pdir: Path | None = None
         provider = ""
         aid = (agent_id or "").strip().lower()
+        # Claude Code agent: not an HTTP backend (the SDK resolves models itself), so a
+        # /v1/models probe yields nothing. Serve the selectable Claude aliases so the
+        # desk model picker offers opus/sonnet/haiku, not just the desk's current model.
+        if _is_claude_agent(aid) or probe_base == _CLAUDE_AGENT_CARD["base_url"]:
+            return {"models": list(_CLAUDE_MODELS),
+                    "current": _CLAUDE_AGENT_CARD["model"],
+                    "base_url": probe_base or _CLAUDE_AGENT_CARD["base_url"]}
         if aid:
             try:
                 pdir = resolve_agent_profile_dir(cfg.agent_profiles_dir, home, aid)
@@ -5377,6 +6309,10 @@ def create_app(
     async def set_manager_profile(body: dict):
         """Point the manager's audits/judge/title calls at an installed profile."""
         pid = (body.get("profile") or "").strip()
+        if pid.lower() in _CLAUDE_AGENT_IDS:
+            # The Claude Agent SDK isn't an LLM endpoint (it resolves models itself —
+            # no base_url/model to POST aux calls to), so it can't run the manager.
+            raise HTTPException(400, "the Claude Agent SDK can't run the manager")
         if pid:
             try:
                 resolve_agent_profile_dir(cfg.agent_profiles_dir, home, pid.lower())
@@ -5504,6 +6440,8 @@ def create_app(
         Message shapes sent to the client:
           JSON array  → ActivityEvent[] batch from the DB (existing format)
           {"live": {type, ...}} → raw worker event (token / tool_start / …)
+          {"subagents": [record, ...]} → durable delegate_task subagent traces,
+              sent once on (re)connect to seed/restore the per-subagent tabs
         """
         await websocket.accept()
         last_count = 0
@@ -5538,6 +6476,17 @@ def create_app(
                 except Exception:
                     break
         replay = list(_live_event_buffer.get(session_id, []))
+        # Restore any subagent tabs (delegate_task children) recorded for this
+        # desk — durable across turns/reloads/restarts via the sidecar. Sent as a
+        # distinct {"subagents": [...]} message the client seeds tab state from;
+        # subsequent live {"type":"subagent"} events append incrementally.
+        subagents = _load_subagents(session_id, _find_workspace(session_id))
+        if subagents:
+            try:
+                await websocket.send_text(
+                    json.dumps({"subagents": list(subagents.values())}))
+            except Exception:
+                pass
         await send_db_snapshot()
         for revt in replay:
             try:

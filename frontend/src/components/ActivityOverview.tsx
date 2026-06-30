@@ -25,6 +25,11 @@ import {
  */
 
 const CAT_ORDER: Cat[] = ["reasoning", "generating", "tool", "idle"]; // top → bottom
+// Categories that count toward the legend/hover percentages. Idle (downtime /
+// waiting) is deliberately excluded — it doesn't represent work, and on a long run
+// it would otherwise dominate the split. Idle still renders as a bar segment and a
+// legend colour key, just without a percentage.
+const ACTIVE_CATS: Cat[] = ["reasoning", "generating", "tool"];
 const CAT_META: Record<Cat, { label: string; color: string }> = {
   reasoning:  { label: "Reasoning",     color: "#a78bfa" },
   generating: { label: "Generating",    color: "#4edca3" },
@@ -81,6 +86,10 @@ interface Seg {
   realStart: number; realLen: number;
   compStart: number; compLen: number;
   turn: OverviewTurn;
+  /** Set on real-time-placed active segs: the single event category this seg
+   *  represents (its interval = previous event → this event's real time). When
+   *  unset (synthetic layout), the whole turn's `seq` is spread across the seg. */
+  cat?: Cat;
 }
 
 export function ActivityOverview({
@@ -114,20 +123,45 @@ export function ActivityOverview({
   const timeline = useMemo(() => {
     const segs: Seg[] = [];
     let comp = 0;
+    const pushIdleTail = (turn: OverviewTurn, from: number) => {
+      const idleDur = turn.end - from;
+      if (idleDur <= 0) return;
+      const isGap = idleDur > GAP_THRESHOLD;
+      const compLen = isGap ? GAP_COMPRESSED : idleDur;
+      segs.push({ kind: isGap ? "gap" : "idle", realStart: from, realLen: idleDur, compStart: comp, compLen, turn });
+      comp += compLen;
+    };
     for (const turn of turns) {
       const dur = turn.end - turn.start;
       if (dur <= 0) continue;
-      const activeDur = Math.min(dur, turn.seq.length * PER_EVENT_SECS);
-      const idleDur = dur - activeDur;
-      if (activeDur > 0) {
-        segs.push({ kind: "active", realStart: turn.start, realLen: activeDur, compStart: comp, compLen: activeDur, turn });
-        comp += activeDur;
-      }
-      if (idleDur > 0) {
-        const isGap = idleDur > GAP_THRESHOLD;
-        const compLen = isGap ? GAP_COMPRESSED : idleDur;
-        segs.push({ kind: isGap ? "gap" : "idle", realStart: turn.start + activeDur, realLen: idleDur, compStart: comp, compLen, turn });
-        comp += compLen;
+      if (turn.timed && turn.times.length === turn.seq.length) {
+        // Real-time placement: each event's category fills the interval from the
+        // previous event (or the turn start) up to its own recorded time, so the
+        // bars sit at the wall-clock the work actually happened — a long agentic
+        // turn now spans its true duration instead of collapsing to a sliver. A
+        // long tool wait shows as a wide "tool" block; only the trailing tail
+        // (last event → turn end, e.g. awaiting the next prompt) is idle.
+        let prev = turn.start;
+        turn.seq.forEach((cat, i) => {
+          const t = turn.times[i];
+          const len = t - prev;
+          if (len > 0) {
+            segs.push({ kind: "active", cat, realStart: prev, realLen: len, compStart: comp, compLen: len, turn });
+            comp += len;
+          }
+          prev = t;
+        });
+        pushIdleTail(turn, prev);
+      } else {
+        // Synthetic fallback (no trustworthy per-event times — e.g. clustered
+        // flush timestamps after a restart): model the first (events × PER_EVENT_SECS)
+        // seconds as active work, the remainder as idle.
+        const activeDur = Math.min(dur, turn.seq.length * PER_EVENT_SECS);
+        if (activeDur > 0) {
+          segs.push({ kind: "active", realStart: turn.start, realLen: activeDur, compStart: comp, compLen: activeDur, turn });
+          comp += activeDur;
+        }
+        pushIdleTail(turn, turn.start + activeDur);
       }
     }
     return { segs, compTotal: comp };
@@ -187,9 +221,15 @@ export function ActivityOverview({
     };
     for (const s of segs) {
       if (s.kind === "active") {
-        const seq = s.turn.seq;
-        const slot = s.compLen / seq.length;
-        seq.forEach((cat, i) => place(cat, s.turn.task, s.compStart + i * slot, s.compStart + (i + 1) * slot));
+        if (s.cat) {
+          // Real-time-placed seg — one event, one category across its interval.
+          place(s.cat, s.turn.task, s.compStart, s.compStart + s.compLen);
+        } else {
+          // Synthetic seg — spread the turn's whole ordered seq across it.
+          const seq = s.turn.seq;
+          const slot = s.compLen / seq.length;
+          seq.forEach((cat, i) => place(cat, s.turn.task, s.compStart + i * slot, s.compStart + (i + 1) * slot));
+        }
       } else if (s.kind === "idle") {
         place("idle", s.turn.task, s.compStart, s.compStart + s.compLen);
       } else {
@@ -271,7 +311,8 @@ export function ActivityOverview({
 
   const totals: Record<Cat, number> = { reasoning: 0, generating: 0, tool: 0, idle: 0 };
   for (const b of buckets) for (const c of CAT_ORDER) totals[c] += b.cats[c];
-  const grand = CAT_ORDER.reduce((s, c) => s + totals[c], 0) || 1;
+  // Denominator excludes idle, so the active categories sum to 100% of work time.
+  const grand = ACTIVE_CATS.reduce((s, c) => s + totals[c], 0) || 1;
 
   const fmt = (sec: number) => {
     const d = new Date(sec * 1000);
@@ -318,7 +359,7 @@ export function ActivityOverview({
           {CAT_ORDER.map((c) => (
             <span key={c} style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-dim)" }}>
               <span style={{ width: 9, height: 9, borderRadius: 2, background: CAT_META[c].color }} />
-              {CAT_META[c].label} {Math.round((totals[c] / grand) * 100)}%
+              {CAT_META[c].label}{c === "idle" ? "" : ` ${Math.round((totals[c] / grand) * 100)}%`}
             </span>
           ))}
         </div>
@@ -355,7 +396,10 @@ export function ActivityOverview({
             ) : (
               <>
                 {"  ·  "}{hb.topTask || "—"}{"  ·  "}
-                {CAT_ORDER.map((c) => `${CAT_META[c].label.split(" ")[0]} ${hb.total > 0 ? Math.round((hb.cats[c] / hb.total) * 100) : 0}%`).join(" / ")}
+                {ACTIVE_CATS.map((c) => {
+                  const act = hb.cats.reasoning + hb.cats.generating + hb.cats.tool;
+                  return `${CAT_META[c].label.split(" ")[0]} ${act > 0 ? Math.round((hb.cats[c] / act) * 100) : 0}%`;
+                }).join(" / ")}
               </>
             )}
           </span>

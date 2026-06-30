@@ -12,13 +12,39 @@ import yaml
 from agent_gui.llm_backend import is_ollama_backend
 
 _GEMINI_HOST = "generativelanguage.googleapis.com"
+_ANTHROPIC_HOST = "api.anthropic.com"
 _ENV_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+# api.anthropic.com is not OpenAI-enumerable (no unauthenticated /v1/models), so a
+# desk on the native-Anthropic ``claude`` profile would otherwise see only its one
+# pinned model. Serve a curated list of current Claude model ids so the picker
+# offers opus/sonnet/haiku/fable — same pattern as the Claude Agent SDK's
+# _CLAUDE_MODELS. These are stable model ids (source: claude-api skill, 2026-06);
+# the per-desk model override + profile config still own which one a desk runs.
+_ANTHROPIC_API_MODELS = (
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    "claude-fable-5",
+)
+
+# Provider aliases mirror server._is_native_anthropic_provider so "native
+# anthropic" means the same thing on both paths.
+_ANTHROPIC_PROVIDERS = ("anthropic", "claude", "claude-oauth", "claude-code")
 
 
 def is_gemini_backend(base_url: str, provider: str = "") -> bool:
     if (provider or "").strip().lower() == "gemini":
         return True
     return _GEMINI_HOST in (base_url or "")
+
+
+def is_anthropic_backend(base_url: str = "", provider: str = "") -> bool:
+    """True for Hermes' native Anthropic provider — the installed ``claude``
+    profile (``provider: anthropic``, base_url api.anthropic.com)."""
+    if (provider or "").strip().lower() in _ANTHROPIC_PROVIDERS:
+        return True
+    return _ANTHROPIC_HOST in (base_url or "")
 
 
 def read_profile_provider(profile_dir: Path) -> str:
@@ -203,6 +229,15 @@ async def fetch_llm_models(
         if live:
             return live
         return []
+
+    if is_anthropic_backend(base, prov):
+        # No unauthenticated /v1/models on api.anthropic.com — serve the curated
+        # Claude list. Profile-cached ids (if Hermes populated them) take priority.
+        if profile_dir:
+            cached = models_from_hermes_cache(profile_dir, prov)
+            if cached:
+                return cached
+        return list(_ANTHROPIC_API_MODELS)
 
     models: list[str] = []
     try:

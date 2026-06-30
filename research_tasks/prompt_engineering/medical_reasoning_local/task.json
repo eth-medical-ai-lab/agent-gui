@@ -1,0 +1,27 @@
+{
+  "id": "medical_reasoning_local",
+  "name": "Medical Reasoning (MedXpertQA) — Local Solver",
+  "description": "Prompt-engineer the system prompt for a LOCAL solver model (Qwen3.5-27B served on a remote GPU server via SSH tunnel) to answer fixed, seeded MedXpertQA multiple-choice questions. The prompt is optimized iteratively BY HAND: the working agent scores a prompt, reads the per-question failures, revises the system prompt, and re-scores — repeating for many rounds. Distinct from the sibling task that uses an API model as the solver — here the solver is local.",
+  "objective": "Maximize dev accuracy (n=20) by editing only the system prompt; report held-out test accuracy (n=100, selection by dev only).",
+  "solver": "Qwen/Qwen3.5-27B (local vLLM via a host SSH tunnel; reached from the Docker sandbox at http://host.docker.internal:8010/v1 by default — if that port moved, run check_tunnel.py to discover the live one)",
+  "dataset": {
+    "source": "TsinghuaC3I/MedXpertQA",
+    "config": "Text",
+    "split": "test",
+    "subsample": "fixed seed=42; dev n=20 (data.jsonl), test n=100 (data_test.jsonl)",
+    "dev_file": "data.jsonl",
+    "test_file": "data_test.jsonl"
+  },
+  "metric": "accuracy",
+  "input": "system_prompt",
+  "entrypoint": {
+    "module": "eval_qwen.py",
+    "function": "evaluate",
+    "signature": "evaluate(prompt: str) -> dict",
+    "cli": "python eval_qwen.py --prompt-file <file>",
+    "iterate": "python run_iter.py <file>   # by-hand loop: score dev (+ test on cadence), log the dashboard, print the misses to fix next"
+  },
+  "baseline_prompt": "baseline_prompt.txt",
+  "requirements": "requirements.txt",
+  "env": ["QWEN_BASE_URL", "QWEN_THINK"]
+}

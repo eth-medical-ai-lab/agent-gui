@@ -9,9 +9,12 @@ from agent_gui.db import Message
 FILE_WRITE_TOOLS = {
     "write_file", "create_file", "file_write", "str_replace_editor",
     "edit_file", "overwrite_file", "append_file",
+    # Claude Code (Claude Agent SDK)
+    "Write", "Edit", "MultiEdit", "NotebookEdit",
 }
 FILE_READ_TOOLS = {
     "read_file", "file_read", "view_file",
+    "Read",
 }
 
 
@@ -73,6 +76,7 @@ def extract_touched_files(messages: list[Message]) -> list[TouchedFile]:
                 or tool_input.get("file_path")
                 or tool_input.get("filename")
                 or tool_input.get("filepath")
+                or tool_input.get("notebook_path")
             )
             if not path or not isinstance(path, str):
                 continue

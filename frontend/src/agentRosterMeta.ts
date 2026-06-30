@@ -37,6 +37,12 @@ export function rosterCategoryForAgent(agent: {
 }): RosterCategoryId | null {
   if (isLocalOllamaProfile(agent)) return "local";
   if (isApiCloudProfile(agent)) return "api";
+  // Built-in Claude Agent SDK agent (ids "claude-sdk"/"claude-agent-sdk", legacy
+  // "claude-code") → group with the cloud/API agents so it shows in a visible
+  // section instead of "Unsorted". A Hermes profile that talks to the Anthropic
+  // API (e.g. the bare "claude" profile) is an API agent too.
+  if (agent.id === "claude-sdk" || agent.id === "claude-agent-sdk" || agent.id === "claude-code") return "api";
+  if (agent.id === "claude" || (agent.name ?? "").toLowerCase().includes("claude")) return "api";
   if (agent.is_prototype && agent.id in CATEGORY_BY_ID) {
     return agent.id as RosterCategoryId;
   }

@@ -254,19 +254,36 @@ class HermesDB:
             log.warning("skipping unreadable desk db %s: %s", db_path, e)
             return None
 
+    @staticmethod
+    def _reasoning_select(conn) -> str:
+        """SELECT expression yielding one ``reasoning_content`` value per row.
+
+        Hermes persists the assistant's thinking trace into one of two columns
+        depending on which field the backend streams: ``reasoning_content`` (the
+        field literally named that — older vLLM, DeepSeek, Anthropic) or
+        ``reasoning`` (newer vLLM reasoning-parser / OpenRouter-style, which the
+        GUI historically never read — the cause of "no reasoning trace"). Coalesce
+        them, preferring reasoning_content, and degrade gracefully when either
+        column is absent (older / Claude-only schemas).
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        has_rc = "reasoning_content" in cols
+        has_r = "reasoning" in cols
+        if has_rc and has_r:
+            return "COALESCE(NULLIF(reasoning_content, ''), reasoning) AS reasoning_content"
+        if has_rc:
+            return "reasoning_content"
+        if has_r:
+            return "reasoning AS reasoning_content"
+        return "NULL AS reasoning_content"
+
     def get_messages(self, session_id: str, limit: int = 500, *, tail: bool = False) -> list[Message]:
         db_path = self._db_for_session(session_id)
         if not db_path:
             return []
         order = "DESC" if tail else "ASC"
         with self._connect(db_path) as conn:
-            # reasoning_content is present in current Hermes schemas but may be
-            # absent in older state.db files — fall back gracefully if so.
-            has_reasoning = any(
-                row["name"] == "reasoning_content"
-                for row in conn.execute("PRAGMA table_info(messages)").fetchall()
-            )
-            reasoning_col = "reasoning_content" if has_reasoning else "NULL AS reasoning_content"
+            reasoning_col = self._reasoning_select(conn)
             rows = conn.execute(
                 f"""
                 SELECT id, session_id, role, content, tool_calls,
@@ -316,13 +333,7 @@ class HermesDB:
         limit = max(1, limit)
         try:
             with self._connect(desk_db) as conn:
-                # reasoning_content may be absent in older state.db files — fall back
-                # gracefully so the Overview chart still counts reasoning when present.
-                has_reasoning = any(
-                    row["name"] == "reasoning_content"
-                    for row in conn.execute("PRAGMA table_info(messages)").fetchall()
-                )
-                reasoning_col = "reasoning_content" if has_reasoning else "NULL AS reasoning_content"
+                reasoning_col = self._reasoning_select(conn)
                 rows = conn.execute(
                     f"""
                     SELECT id, session_id, role, content, tool_calls,

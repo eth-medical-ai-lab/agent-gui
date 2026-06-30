@@ -3,6 +3,13 @@ import type { AgentProfile, DeskItem, FilePreviewData, PendingAssignment, Reason
 import type { DeskConfigView } from "../deskConfig";
 import { TeamRow } from "./TeamRow";
 
+// Extra scroll room below the last team row. A desk panel is anchored *below* its
+// row in viewport space (portaled to document.body, position: fixed), so on the
+// bottom team row it lands past the floor's scrollable content. Without slack here
+// there's nowhere to scroll it, so opening that desk shows "no window extending
+// down". Sized to clear a default-height desk panel.
+const FLOOR_BOTTOM_RESERVE = 480;
+
 interface Props {
   teams: Team[];
   searchMatchIds?: Set<string>;
@@ -146,7 +153,7 @@ export function Office({
         <WallClock />
       </div>
 
-      <div data-floor-scroll style={{ flex: 1, overflowY: "auto", overflowX: "hidden", paddingBottom: 24 }}>
+      <div data-floor-scroll style={{ flex: 1, overflowY: "auto", overflowX: "hidden", paddingBottom: FLOOR_BOTTOM_RESERVE }}>
         {teams.map((team, idx) => (
           <TeamRow
             key={team.id}

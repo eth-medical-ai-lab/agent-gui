@@ -1,0 +1,6 @@
+# No third-party dependencies.
+#
+# eval_qwen.py, run_iter.py, results_log.py and check_tunnel.py use only the
+# Python standard library (urllib) to talk to the local Qwen vLLM server over the
+# SSH tunnel. The prompt is engineered by hand, so there is no Anthropic/OpenAI
+# client to install.

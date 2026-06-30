@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { ActivityEvent, LiveState } from "../types";
 import { scrollContainerToBottom } from "../scrollContainer";
 import { MANAGER_MSG_PREFIX } from "../types";
+import { toolIcon } from "../toolIcons";
 
 interface AttachedImage { name: string; url: string }
 
@@ -356,7 +357,7 @@ function InterruptedAgentBubble({ text }: { text: string }) {
 function SimpleLive({ liveState, elapsed }: { liveState: LiveState; elapsed: number }) {
   const { toolName, streamText, thinkingText, logLine, statusLine } = liveState;
   const phrase = streamText ? "Responding"
-    : thinkingText ? "Reasoning"
+    : thinkingText?.trim() ? "Reasoning"
     : toolName ? toolVerb(toolName)
     : statusLine || "Working";
 
@@ -380,9 +381,95 @@ function SimpleLive({ liveState, elapsed }: { liveState: LiveState; elapsed: num
   );
 }
 
+// Reveal speed (chars/second). The drip eases up with the backlog so it keeps
+// pace with sustained output, but is floored (so pauses/tails don't stall) and
+// capped (so it stays a deliberately slow, smooth typewriter rather than a
+// burst). Raise MAX_CPS to make it faster overall; raise MIN_CPS to drain the
+// tail/pauses quicker. Beyond CATCHUP_BACKLOG chars behind (a reconnect replay
+// or one giant delta) it blasts ahead instead of crawling for seconds.
+const TYPE_MIN_CPS = 100;
+const TYPE_MAX_CPS = 320;
+const TYPE_CATCHUP_BACKLOG = 180;
+
+/**
+ * Smooth bursty streaming text into a steady, slow "typewriter" reveal.
+ *
+ * The transport is already per-delta, but cloud models (Claude via the Agent
+ * SDK) relay the API's text deltas in coarse, *sporadic* multi-token chunks —
+ * so raw `streamText` jumps line-by-line, unlike a local model's steady
+ * one-token cadence. We keep the full text as the source of truth and REVEAL it
+ * on a single persistent, *time-based* loop, so it runs at the same speed on a
+ * 60 Hz and a 120 Hz/ProMotion display (a per-frame step would reveal twice as
+ * fast on ProMotion, which read as "too fast"). `target` is the full accumulated
+ * text; the returned prefix catches up to it. On reset/divergence (a new turn or
+ * a tool flush clears `streamText`) we snap — never animate backwards or drop
+ * characters. A slow local model already trickles in under the floor rate, so
+ * this is effectively a no-op for Hermes and only smooths Claude.
+ */
+function useTypewriter(target: string): string {
+  const targetRef = useRef(target);
+  const shownRef = useRef(target);
+  const rafRef = useRef<number | null>(null);
+  const lastTsRef = useRef<number | null>(null);
+  const carryRef = useRef(0);            // fractional chars carried between frames
+  const [, forceRender] = useState(0);
+  targetRef.current = target;
+
+  const tick = useCallback((now: number) => {
+    const tgt = targetRef.current;
+    const cur = shownRef.current;
+    if (!tgt.startsWith(cur) || cur.length >= tgt.length) { rafRef.current = null; return; }
+    const last = lastTsRef.current;
+    lastTsRef.current = now;
+    const dt = last == null ? 16 : Math.min(now - last, 100);   // ms; clamp tab-stall jumps
+    const backlog = tgt.length - cur.length;
+    const cps = backlog > TYPE_CATCHUP_BACKLOG
+      ? backlog * 4
+      : Math.min(TYPE_MAX_CPS, Math.max(TYPE_MIN_CPS, backlog * 6));
+    const advance = carryRef.current + cps * (dt / 1000);
+    const whole = Math.floor(advance);
+    carryRef.current = advance - whole;  // keep the remainder so slow rates still progress
+    if (whole > 0) {
+      shownRef.current = tgt.slice(0, cur.length + whole);
+      forceRender((n) => n + 1);
+    }
+    rafRef.current = shownRef.current.length < tgt.length ? requestAnimationFrame(tick) : null;
+  }, []);
+
+  useEffect(() => {
+    // Snap on reset/divergence (turn reset / tool flush set streamText back to ""
+    // or to unrelated text) — never animate backwards or drop characters.
+    if (!target.startsWith(shownRef.current)) {
+      shownRef.current = target;
+      carryRef.current = 0;
+      forceRender((n) => n + 1);
+      return;
+    }
+    // (Re)start the loop only if we've fallen behind and it isn't already running.
+    // A running loop tracks the growing target via targetRef without restarting,
+    // so its time base stays continuous across tokens.
+    if (shownRef.current.length < target.length && rafRef.current == null) {
+      lastTsRef.current = null;
+      rafRef.current = requestAnimationFrame(tick);
+    }
+  }, [target, tick]);
+
+  // Stop only on unmount; the loop self-terminates once it catches up.
+  useEffect(() => () => {
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+  }, []);
+
+  return shownRef.current;
+}
+
 /** Verbose: full tool/stream/thinking + elapsed time */
 function VerboseLive({ liveState, elapsed }: { liveState: LiveState; elapsed: number }) {
   const { streamText, toolName, logLine, thinkingText, statusLine } = liveState;
+  // Smooth the two raw streamed-text surfaces (response + reasoning). Called
+  // unconditionally here — before VerboseLive's early returns — per Rules of Hooks.
+  const revealedText = useTypewriter(streamText);
+  const revealedThink = useTypewriter(thinkingText ?? "");
 
   // Keep the streaming reasoning box pinned to the bottom so the newest tokens
   // stay in view. (Rendering the full trace — not a trailing slice — means the
@@ -402,9 +489,9 @@ function VerboseLive({ liveState, elapsed }: { liveState: LiveState; elapsed: nu
   useEffect(() => {
     const el = thinkRef.current;
     if (el && Date.now() >= pausedUntilRef.current) el.scrollTop = el.scrollHeight;
-  }, [thinkingText]);
+  }, [revealedThink]);
 
-  if (thinkingText && !toolName && !streamText) {
+  if (thinkingText?.trim() && !toolName && !streamText) {
     return (
       <div style={{ padding: "5px 16px", marginLeft: 8, borderLeft: "2px solid var(--purple)" }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: "var(--purple)", marginBottom: 3, display: "flex", alignItems: "center", gap: 6 }}>
@@ -417,7 +504,7 @@ function VerboseLive({ liveState, elapsed }: { liveState: LiveState; elapsed: nu
           whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "monospace",
           maxHeight: 120, overflowY: "auto", opacity: 0.8,
         }}>
-          {thinkingText}
+          {revealedThink}
         </div>
       </div>
     );
@@ -427,7 +514,7 @@ function VerboseLive({ liveState, elapsed }: { liveState: LiveState; elapsed: nu
     return (
       <div style={{ padding: "6px 16px 6px 26px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 13 }}>🔧</span>
+          <span style={{ fontSize: 13 }}>{toolIcon(toolName)}</span>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent2)", fontFamily: "monospace" }}>{toolName}</span>
           <PulseDots delay={0.18} />
           <ElapsedBadge elapsed={elapsed} />
@@ -451,7 +538,7 @@ function VerboseLive({ liveState, elapsed }: { liveState: LiveState; elapsed: nu
           fontSize: 11, color: "var(--text)", lineHeight: 1.55,
           whiteSpace: "pre-wrap", wordBreak: "break-word",
         }}>
-          {streamText}
+          {revealedText}
           <span style={{
             display: "inline-block", width: 7, height: 13,
             background: "var(--accent2)", marginLeft: 2,
@@ -487,7 +574,10 @@ export function ActivityFeed({ events, liveEvents = [], loading, isActive, liveS
   // Content-driven, NOT gated on isActive/is_running (those come from the 5s poll
   // and lag a just-sent follow-up by seconds) — so the live status shows the instant
   // there's anything to show, including an optimistic statusLine set on send.
-  const hasLive = Boolean(liveState && (liveState.streamText || liveState.toolName || liveState.logLine || liveState.thinkingText || liveState.statusLine));
+  // Treat whitespace-only reasoning (empty `<think>\n\n</think>` blocks that
+  // qwen3-style models emit on most tool-calling turns) as "no reasoning", so it
+  // doesn't flash an empty Reasoning panel — matches the trimmed DB/replay path.
+  const hasLive = Boolean(liveState && (liveState.streamText || liveState.toolName || liveState.logLine || liveState.thinkingText?.trim() || liveState.statusLine));
 
   // Start/reset elapsed timer when live activity changes
   useEffect(() => {

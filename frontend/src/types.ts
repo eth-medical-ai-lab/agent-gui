@@ -9,6 +9,11 @@ export interface Session {
   message_count: number;
   token_estimate: number;
   is_running?: boolean;
+  /** First-command / last-activity timestamps across the desk's whole lineage
+   *  (same span the Overview uses). Used for the desk-card execution timer so an
+   *  idle desk freezes at its last activity instead of ticking wall-clock. */
+  first_activity_at?: string | null;
+  last_activity_at?: string | null;
   title_summary?: string | null;
   auto_continue?: boolean;
   /** Set by the backend when the most recent manager audit passed every check.
@@ -22,6 +27,9 @@ export interface Session {
   agent_base_url?: string | null;
   /** Enabled UI toolset names from `.hermes_tools` marker. */
   desk_tools?: string[];
+  /** Team this desk belongs to (from its server-side `.hermes_team_id` marker).
+   *  Lets the office reconstruct teams created outside the browser (API/script). */
+  team_id?: string | null;
 }
 
 export interface ToolsetMeta {
@@ -249,12 +257,56 @@ export interface TodoData {
 
 /** Live event emitted by hermes_worker.py over the activity WebSocket. */
 export interface WorkerEvent {
-  type: "token" | "tool_start" | "tool_done" | "thinking" | "status" | "log" | "done" | "error" | "interrupted" | "agent_arrived";
-  text?: string;   // token / thinking
+  type: "token" | "tool_start" | "tool_done" | "thinking" | "status" | "log" | "done" | "error" | "interrupted" | "agent_arrived" | "subagent";
+  text?: string;   // token / thinking / subagent(thinking,progress)
   name?: string;   // tool_start / tool_done
   result?: string; // tool_done
-  event?: string;  // status
+  event?: string;  // status / subagent lifecycle (start|thinking|tool|progress|complete)
   msg?: string;    // status / error
+  // ── subagent (delegate_task child) fields ──
+  subagent_id?: string;
+  parent_id?: string;
+  depth?: number;
+  model?: string;
+  task_index?: number;  // 0-based position within its delegate_task call
+  task_count?: number;  // batch size of that call
+  goal?: string;        // subagent.start → the task/input
+  tool_name?: string;   // subagent.tool
+  preview?: string;     // subagent.tool args preview
+  args?: string;        // subagent.tool serialized args
+  status?: string;      // subagent.complete → ok|error|timeout|failed
+  output?: string;      // subagent.complete → the result/output
+  duration_seconds?: number;
+}
+
+/** A single entry in a subagent's activity timeline. */
+export interface SubagentTimelineEvent {
+  event: string;        // start | thinking | tool | progress | complete
+  ts: number;
+  text?: string;
+  tool_name?: string;
+  preview?: string;
+  goal?: string;
+  status?: string;
+  output?: string;
+  duration_seconds?: number;
+}
+
+/** A delegate_task subagent's durable trace, one per desk tab. */
+export interface SubagentRecord {
+  subagent_id: string;
+  parent_id?: string;
+  depth?: number;
+  model?: string;
+  task_index?: number;                // 0-based position within its delegate_task call
+  task_count?: number;                // batch size of that call
+  goal: string;                       // the task/input
+  status: string;                     // running | ok | error | timeout | failed
+  started_at?: number;
+  ended_at?: number | null;
+  output: string;                     // final result/output
+  duration_seconds?: number;
+  events: SubagentTimelineEvent[];    // tool/thinking/progress timeline
 }
 
 /** Accumulated live state shown while a session is actively running. */

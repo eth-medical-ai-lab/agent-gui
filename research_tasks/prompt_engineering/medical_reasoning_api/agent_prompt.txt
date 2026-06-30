@@ -1,0 +1,5 @@
+You are working on the Medical Reasoning (MedXpertQA) prompt-engineering task in team_files/prompt_engineering/medical_reasoning_api/.
+
+Goal: improve a fixed Claude model's accuracy on medical multiple-choice questions by editing only the system prompt. Iterate on the train split with eval.py (beat baseline_prompt.txt), then take one held-out measurement on the test split with submit.py. Never tune against the test split.
+
+Read README.md and task.json in that folder for the full workflow, then carry out the task as described there.

@@ -40,5 +40,44 @@ if ! "$ENV_PY" -m pip show agent-gui >/dev/null 2>&1; then
   "$ENV_PY" -m pip install -e . -q
 fi
 
-echo "Starting Agent GUI (conda env: ${CONDA_ENV})..."
+# GPU selection for host-run agents (Claude Agent SDK desks run their CUDA work on
+# the host) and Docker sandboxes — confined to CUDA_VISIBLE_DEVICES. Ask which
+# GPU(s) to use at startup. The prompt is skipped when HERMES_GUI_CUDA_VISIBLE_DEVICES
+# is already set (we honor your export), there's no `nvidia-smi` (no NVIDIA GPUs —
+# e.g. macOS), or stdin isn't a TTY (non-interactive run).
+if [ -z "${HERMES_GUI_CUDA_VISIBLE_DEVICES:-}" ] && [ -t 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
+  GPU_LIST="$(nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null || true)"
+  if [ -n "$GPU_LIST" ]; then
+    echo "Detected GPUs (index, name, mem used / total):"
+    echo "$GPU_LIST" | sed 's/^/  /'
+    read -r -p "Which GPU(s) should agents use? e.g. 0 or 0,1  [Enter = all]: " gpu_choice || true
+    gpu_choice="${gpu_choice// /}"   # tolerate "0, 1"
+    case "$gpu_choice" in
+      ""|a|A|all|ALL) : ;;                                       # all GPUs → leave unset
+      *[!0-9,]*) echo "  '$gpu_choice' isn't a GPU index list — using all GPUs." ;;
+      *) export HERMES_GUI_CUDA_VISIBLE_DEVICES="$gpu_choice" ;;
+    esac
+  fi
+fi
+
+# To skip the prompt next time, export your choice first (or add it to ~/.zshrc):
+#   export HERMES_GUI_CUDA_VISIBLE_DEVICES="2"     # only GPU 2
+#   export HERMES_GUI_CUDA_VISIBLE_DEVICES="0,1"   # GPUs 0 and 1
+# Consumed by agent_gui/server.py (_gpu_worker_env), injected into each agent worker.
+if [ -n "${HERMES_GUI_CUDA_VISIBLE_DEVICES:-}" ]; then
+  export HERMES_GUI_CUDA_VISIBLE_DEVICES
+  GPU_NOTE="${HERMES_GUI_CUDA_VISIBLE_DEVICES}"
+else
+  GPU_NOTE="all"
+fi
+
+# Experimental/developmental features (currently the Claude Code SDK agent) are
+# opt-in. Pass --experimental and it's forwarded to `python -m agent_gui` via
+# "$@"; we just detect it here to surface the state in the startup banner.
+EXPERIMENTAL="off"
+for arg in "$@"; do
+  [ "$arg" = "--experimental" ] && EXPERIMENTAL="ON (Claude Code SDK agent enabled)"
+done
+
+echo "Starting Agent GUI (conda env: ${CONDA_ENV}, GPU: ${GPU_NOTE}, experimental: ${EXPERIMENTAL})..."
 exec "$ENV_PY" -m agent_gui "$@"

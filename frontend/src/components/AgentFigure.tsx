@@ -13,7 +13,7 @@ const WT = "#f2f0ec";  // shirt white
 const NT = "#181822";  // trousers
 const SH = "#0e0e14";  // shoes
 
-export type AgentArchetype = "coder" | "researcher" | "cloud" | "local" | "default";
+export type AgentArchetype = "coder" | "researcher" | "cloud" | "local" | "claude" | "default";
 
 // Roster prototype ids → the pixel-art look they get. Clones inherit their
 // source prototype's look (via clone_from); everything else is the default
@@ -29,6 +29,11 @@ export const PROTOTYPE_IDS = new Set(Object.keys(ARCHETYPE_BY_ID));
 
 function archetypeFromBase(base: string | undefined): AgentArchetype {
   if (!base) return "default";
+  // Built-in Claude Agent SDK agent (ids "claude-sdk"/"claude-agent-sdk", legacy
+  // "claude-code") gets its own look without joining ARCHETYPE_BY_ID/PROTOTYPE_IDS
+  // (it isn't a clonable prototype). The bare "claude" id is a Hermes+API profile,
+  // NOT the SDK, so it keeps the default office-worker look.
+  if (base === "claude-sdk" || base === "claude-agent-sdk" || base === "claude-code") return "claude";
   return ARCHETYPE_BY_ID[base] ?? "default";
 }
 
@@ -38,6 +43,7 @@ function defaultAccent(archetype: AgentArchetype): string {
     case "researcher": return "#e67e22";
     case "cloud": return "#a78bfa";
     case "local": return "#58a6ff";
+    case "claude": return "#d97757";
     default: return "#6a7a9a";
   }
 }
@@ -270,6 +276,40 @@ function getOutfit(archetype: AgentArchetype, accent: string): Outfit {
           <>
             {r(7, 11, 1, 1, O, "smile-l")}{r(12, 11, 1, 1, O, "smile-r")}
             {r(7, 12, 6, 1, O, "smile-b")}{r(8, 12, 4, 1, WT, "teeth")}
+          </>
+        ),
+      };
+    }
+    case "claude": {
+      const tee = shade(accent, -28);
+      const teeHi = shade(accent, -4);
+      const spark = "#ffe9cf";  // warm cream — Anthropic sparkle
+      return {
+        garment: tee, garmentHi: teeHi, cuff: shade(accent, -42), collar: tee,
+        torso: (
+          <>
+            {r(8, 17, 4, 9, teeHi, "tee")}
+            {/* Anthropic "sparkle" emblem on the chest (8-point star) */}
+            {r(10, 19, 1, 5, spark, "sp-v")}{r(8, 21, 5, 1, spark, "sp-h")}
+            {r(9, 20, 1, 1, spark, "sp-tl")}{r(11, 20, 1, 1, spark, "sp-tr")}
+            {r(9, 22, 1, 1, spark, "sp-bl")}{r(11, 22, 1, 1, spark, "sp-br")}
+          </>
+        ),
+        hair: (
+          <>
+            {r(5, 5, 10, 3, "#2e2622", "hair")}
+            {r(5, 6, 2, 4, "#2e2622", "hair-l")}{r(13, 6, 2, 4, "#2e2622", "hair-r")}
+            {r(6, 4, 8, 1, "#3c322c", "hair-top")}
+          </>
+        ),
+        mouth: <>{r(7, 12, 6, 1, O, "mouth")}{r(8, 12, 2, 1, SK, "m1")}{r(10, 12, 2, 1, SK, "m2")}</>,
+        floating: (
+          // Claude starburst, top-right (8-point sparkle)
+          <>
+            {r(16, 1, 1, 5, accent, "b-v")}{r(14, 3, 5, 1, accent, "b-h")}
+            {r(15, 2, 1, 1, accent, "b-tl")}{r(17, 2, 1, 1, accent, "b-tr")}
+            {r(15, 4, 1, 1, accent, "b-bl")}{r(17, 4, 1, 1, accent, "b-br")}
+            {r(16, 3, 1, 1, "#fff6ec", "b-core")}
           </>
         ),
       };

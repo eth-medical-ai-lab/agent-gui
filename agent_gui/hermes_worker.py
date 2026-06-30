@@ -473,6 +473,20 @@ def _normalize_api_mode(api_mode: str, base_url: str, provider: str = "") -> str
     return mode
 
 
+def _is_native_anthropic(provider: str) -> bool:
+    """True for Hermes' native Anthropic provider (api_mode: anthropic_messages,
+    x-api-key auth, endpoint /v1/messages).
+
+    The GUI/frontend defaults api_mode to ``chat_completions``; Hermes honors an
+    explicit api_mode over provider-based detection (agent_init.py), so that
+    default would POST an OpenAI-shaped request to api.anthropic.com — which has
+    no /chat/completions route → HTTP 404. Detect the provider and force the
+    correct transport instead. Aliases match the Hermes provider plugin.
+    """
+    return (provider or "").strip().lower() in (
+        "anthropic", "claude", "claude-oauth", "claude-code")
+
+
 def _supports_ollama_think_param(model: str) -> bool:
     m = (model or "").lower()
     return any(k in m for k in ("qwen", "deepseek", "r1"))
@@ -1321,6 +1335,61 @@ def main() -> None:
     def on_status(event_type: str, msg: str = "") -> None:
         emit({"type": "status", "event": str(event_type), "msg": str(msg)})
 
+    def on_subagent_progress(event_type=None, tool_name=None, preview=None,
+                             args=None, **payload) -> None:
+        # Hermes relays child-agent (delegate_task) lifecycle through the
+        # PARENT's tool_progress_callback as "subagent.*" events — see
+        # delegate_tool.py:_build_child_progress_callback. Each carries an
+        # identity payload (subagent_id, parent_id, depth, model, goal, ...).
+        # Any non-subagent progress is already surfaced via tool_gen/
+        # tool_complete, so we ignore everything that isn't a subagent event.
+        try:
+            ev = str(event_type or "")
+            if not ev.startswith("subagent"):
+                return
+            sid = payload.get("subagent_id")
+            if not sid:
+                # Legacy nested-orchestrator summaries arrive without an id
+                # (e.g. "subagent_progress", <summary>). No id → no tab to
+                # attach to; the per-subagent stream already carries the work.
+                return
+            out: dict = {"type": "subagent", "subagent_id": str(sid)}
+            for k in ("parent_id", "depth", "model", "task_index", "task_count"):
+                if payload.get(k) is not None:
+                    out[k] = payload[k]
+
+            if ev in ("subagent.start", "subagent.spawn_requested"):
+                out["event"] = "start"
+                out["goal"] = payload.get("goal") or (str(preview) if preview else "")
+            elif ev == "subagent.thinking":
+                out["event"] = "thinking"
+                out["text"] = str(preview or tool_name or "")
+            elif ev == "subagent.tool":
+                out["event"] = "tool"
+                out["tool_name"] = str(tool_name or "")
+                if preview:
+                    out["preview"] = str(preview)[:2000]
+                if args is not None:
+                    out["args"] = json.dumps(args, ensure_ascii=False, default=str)[:6000]
+            elif ev == "subagent.progress":
+                out["event"] = "progress"
+                out["text"] = str(preview or tool_name or "")
+            elif ev == "subagent.complete":
+                out["event"] = "complete"
+                out["status"] = str(payload.get("status") or "ok")
+                _final = (payload.get("output_tail") or payload.get("summary")
+                          or (str(preview) if preview else ""))
+                out["output"] = str(_final)[:8000]
+                for k in ("duration_seconds", "output_tokens", "api_calls",
+                          "cost_usd", "files_written"):
+                    if payload.get(k) is not None:
+                        out[k] = payload[k]
+            else:
+                return
+            emit(out)
+        except Exception:
+            pass
+
     # ── Resolve model before reasoning (llama/mistral reject thinking params) ──
     is_ollama = _is_ollama_backend(cfg_base_url, cfg_provider)
     profile_assigned = bool(agent_profile)
@@ -1357,6 +1426,17 @@ def main() -> None:
     use_native = _wants_native_ollama_proxy(cfg_api_mode, env_api_mode)
     raw_api_mode = cfg_api_mode or env_api_mode or ""
     effective_api_mode = _normalize_api_mode(raw_api_mode, cfg_base_url, cfg_provider)
+    # Native Anthropic provider: force the Anthropic Messages transport (and a
+    # default base_url) regardless of the api_mode the GUI/frontend passed —
+    # otherwise the default 'chat_completions' yields HTTP 404 against
+    # api.anthropic.com (no /chat/completions route). See _is_native_anthropic.
+    if _is_native_anthropic(cfg_provider):
+        if effective_api_mode != "anthropic_messages":
+            emit({"type": "log", "msg": f"[worker] provider={cfg_provider!r} → forcing api_mode anthropic_messages (was {effective_api_mode or 'unset'!r})"})
+        effective_api_mode = "anthropic_messages"
+        use_native = False
+        if not cfg_base_url:
+            cfg_base_url = "https://api.anthropic.com"
     if raw_api_mode.strip().lower() == "codex_responses" and effective_api_mode == "chat_completions":
         label = "local Ollama" if is_ollama else "local vLLM"
         emit({"type": "log", "msg": f"[worker] api_mode codex_responses → chat_completions ({label})"})
@@ -1453,6 +1533,7 @@ def main() -> None:
             thinking_callback=on_thinking,
             reasoning_callback=on_thinking,
             status_callback=on_status,
+            tool_progress_callback=on_subagent_progress,
             skip_memory=not share_memory,
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled or None,

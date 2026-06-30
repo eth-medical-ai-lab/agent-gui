@@ -28,7 +28,7 @@ terminal:
   docker_run_as_host_user: true
   modal_mode: auto
   cwd: .
-  timeout: 300
+  timeout: 1800
   lifetime_seconds: 86400
   env_passthrough: []
   shell_init_files: []

@@ -19,13 +19,14 @@ export const AVATAR_OPTIONS: { id: AgentArchetype; label: string }[] = [
   { id: "researcher", label: "Researcher" },
   { id: "cloud", label: "Sage" },
   { id: "local", label: "Friendly" },
+  { id: "claude", label: "Claude" },
 ];
 
 /** Color swatches to choose from. */
 export const AVATAR_COLORS: string[] = [
   "#4a8eff", "#58a6ff", "#a78bfa", "#e67e22",
   "#2ecc71", "#1abc9c", "#ff6b9d", "#f1c40f",
-  "#e74c3c", "#9aa0b0",
+  "#e74c3c", "#d97757", "#9aa0b0",
 ];
 
 const AVATARS_KEY = "hermes-roster-avatars";

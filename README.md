@@ -2,7 +2,7 @@
   <img src="img/full-logo.gif" alt="AgentGUI" height="180">
 </p>
 
-> AgentGUI: a human-friendly interface for observing and steering AI agents. Built for [Hermes](https://github.com/nousresearch/hermes-agent) agents.
+> AgentGUI: a human-friendly interface for observing and steering AI agents research team. Currently supporting [Hermes](https://github.com/nousresearch/hermes-agent) agents and (experimental) [Claude Agent](https://code.claude.com/docs/en/agent-sdk/overview).
 
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![Node](https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&logoColor=white)
@@ -50,10 +50,10 @@ bash install_profile.sh
 
 Press Enter to accept the default (shown in parentheses).
 
-| | ☁️ Gemini API | 🦙 Ollama | ⚡ vLLM |
-| --- | --- | --- | --- |
-| **Recommended for** | No GPU, fastest start | Inference on your laptop | Inference on a local server |
-| **Input requirements** | API key ([Google AI Studio](https://aistudio.google.com/), free tier) | Model name | Model name + endpoint URL |
+| | ☁️ Gemini API | ☁️ Claude API | 🦙 Ollama | ⚡ vLLM |
+| --- | --- | --- | --- | --- |
+| **Recommended for** | No GPU, fastest start | No GPU, top-tier agentic quality | Inference on your laptop | Inference on a local server |
+| **Input requirements** | API key ([Google AI Studio](https://aistudio.google.com/), free tier) | API key ([Anthropic Console](https://console.anthropic.com/)) | Model name | Model name + endpoint URL |
 
 <details>
 <summary><strong>☁️ Gemini API</strong></summary>
@@ -61,6 +61,14 @@ Press Enter to accept the default (shown in parentheses).
 1. Create a free API key at [Google AI Studio](https://aistudio.google.com/).
 2. Run `bash install_profile.sh`, choose **API (Gemini)**, and paste your key when prompted.
 3. Default model is `gemini-3.1-flash-lite` — change it at the prompt, or in AgentGUI app, or later with `hermes -p <profile> model`.
+</details>
+
+<details>
+<summary><strong>☁️ Claude API</strong></summary>
+
+1. Create an API key at the [Anthropic Console](https://console.anthropic.com/).
+2. Run `bash install_profile.sh`, choose **API → Claude (Anthropic)**, and paste your key when prompted (written to the profile's `.env` as `ANTHROPIC_API_KEY`).
+3. Default model is `claude-opus-4-8` (best for autonomous agentic work) — change it at the prompt (e.g. `claude-sonnet-4-6` for lower cost/latency), or later with `hermes -p <profile> model`. Hermes uses its native `anthropic` provider, so auxiliary calls (titles, compression, …) run on `claude-haiku-4-5` automatically.
 </details>
 
 <details>
@@ -144,7 +152,12 @@ terminal:
   lifetime_seconds: 86400   # default was 300
 ```
 
-[One-liner to apply this automatically →](DEVELOPER_NOTES.md#prevent-docker-container-accumulation)
+We also recommend setting terminal.timeout higher than the default 300s to avoid works that run long training scripts from being killed. For example, set it to 30mins:
+```yaml
+terminal:
+  timeout: 1800   # default was 300
+```
+Note that this is the default setting used by our `install_profile.sh` script.
 
 If you are using existing Ollama backend, please ensure you start your Ollama server using the following environment arguments:
 
@@ -235,6 +248,7 @@ For all `./start.sh`, `bash dev.sh`, or `python -m agent_gui` — the server run
 --hermes-home ~/.hermes       Custom Hermes home directory
 --no-open                     Don't auto-open the browser
 --workspace-root ~/workspace  Where per-desk working dirs are created
+--experimental                Enable developmental features (Claude Agent SDK agent); off by default
 ```
 
 ---
@@ -252,7 +266,46 @@ For all `./start.sh`, `bash dev.sh`, or `python -m agent_gui` — the server run
 
 > Hard-refresh (Cmd+Shift+R) after updating to pick up new JS bundles.
 
+---
 
+## Using AgentGUI for research
+
+We provide two demo research tasks under [`research_tasks/`](research_tasks/). You can simply drag the directory into `team_files` in the app, copy the task's prompt text into a desk (`task.md` for `model_training/organsmnist`, `agent_prompt.txt` for the `prompt_engineering` tasks), and watch the agent carry out the task.
+- For the prompt-tuning (`prompt_engineering/medical_reasoning_api`) API example, a Claude API key needs to be passed inside the docker sandbox. See the note below and the task's `README.md` for details.
+
+> ⚠️ **Research tasks that call a Claude API need the key *inside* the sandbox.** Whichever agent you assign to a task under [`research_tasks/`](research_tasks/) (e.g. `prompt_engineering/medical_reasoning_api`) runs inside its Docker sandbox, so a host-only `ANTHROPIC_API_KEY` is **not** visible to it. You must (1) set `ANTHROPIC_API_KEY` in your environment **and** (2) forward it into the sandbox by adding it to that agent's Hermes profile config:
+>
+> ```yaml
+> terminal:
+>   docker_forward_env:
+>     - "ANTHROPIC_API_KEY"
+> ```
+
+---
+
+## Experimental: Claude Agent SDK agent
+
+> **Off by default — developmental feature.** Enable it with the `--experimental` flag when running `start.sh` or `python -m agent_gui --experimental`; without the flag, the app exposes only the stable Hermes agents.
+
+AgentGUI can optionally run a desk with Anthropic's **Claude Agent SDK** (the `claude-agent-sdk` package that powers Claude Code) instead of a Hermes agent. The desk surfaces the agent's live activity, files, and debug stream just like a Hermes desk — but the agent underneath is Claude Code, not Hermes.
+
+**Enable it**
+
+```bash
+# Prerequisites: `pip install claude-agent-sdk` in the GUI env, and the `claude` CLI on your `PATH`.
+./start.sh --experimental
+# or
+python -m agent_gui --experimental
+```
+
+A **Claude Agent SDK** agent then shows up in the 👥 Agent Profiles roster (grouped under **API**). Drag it onto a desk — or pick it in the desk's agent picker. The SDK shells out to the `claude` CLI and resolves credentials the way the CLI does: it uses your `claude /login` subscription (or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`).
+
+The desk is **subscription-only**: AgentGUI strips `ANTHROPIC_API_KEY` (plus `ANTHROPIC_AUTH_TOKEN` and the Bedrock/Vertex/Foundry flags) from the Claude worker's environment, so a stale or wrong API key can't silently *shadow* your login (the CLI's credential precedence is API key > OAuth token > `/login`). To bill Claude usage to an API key instead, run a Hermes desk on a Claude model.
+
+
+Important notes:
+- The Claude Agent SDK agent executes its tools outside of the Hermes docker sandbox. Only use it at work you'd let an agent run on your host directly.
+- Despite prevention of API key shadowing, we **strongly recommend** that you unset your inference API keys from your environment when running the Claude Agent SDK agent. This could avoid the agent potentially writing code or making API calls that would incur unwanted costs.
 ---
 
 ## Dev mode (hot-reload)

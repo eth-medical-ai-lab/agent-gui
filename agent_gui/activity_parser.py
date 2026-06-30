@@ -19,8 +19,21 @@ TOOL_ICONS = {
     "delegate": "👥", "spawn_agent": "👥", "subagent": "👥",
     "skill_view": "📚", "skill_run": "📚",
     "python": "🐍",
+    # Claude Code (Claude Agent SDK) tool names — PascalCase, so they need their
+    # own entries; persisted faithfully (not remapped to the Hermes vocabulary).
+    "Read": "📖", "Write": "📝", "Edit": "✏️", "MultiEdit": "✏️", "NotebookEdit": "✏️",
+    "Bash": "⚡", "BashOutput": "⚡", "KillShell": "⚡",
+    "Glob": "🔍", "Grep": "🔍", "WebSearch": "🔍", "WebFetch": "🌐",
+    "Task": "👥", "TodoWrite": "📋", "ExitPlanMode": "📋",
     "default": "🔧",
 }
+
+# An assistant message's visible text becomes a feed "message" event only when its
+# stripped length exceeds this — tiny/whitespace-only runs (e.g. a stray space a
+# model emits right before a tool call) are dropped. server._record_worker_evt_time
+# applies the SAME threshold when recording real per-event time markers, so the
+# per-kind marker count stays aligned 1:1 with these events (see _apply_real_times).
+MIN_MESSAGE_LEN = 5
 
 
 @dataclass
@@ -49,18 +62,25 @@ def _clean(text: str) -> str:
 
 
 def _tool_detail(tool_name: str, tool_input: dict) -> str:
-    if tool_name in ("bash", "execute_command", "run_command", "terminal"):
+    if tool_name in ("bash", "execute_command", "run_command", "terminal", "Bash"):
         return _truncate(tool_input.get("command", tool_input.get("cmd", str(tool_input))))
-    if tool_name in ("write_file", "create_file", "file_write", "str_replace_editor", "edit_file", "read_file", "file_read"):
-        path = tool_input.get("path") or tool_input.get("file_path") or tool_input.get("filename") or ""
+    if tool_name in ("write_file", "create_file", "file_write", "str_replace_editor",
+                     "edit_file", "read_file", "file_read",
+                     "Read", "Write", "Edit", "MultiEdit", "NotebookEdit"):
+        path = (tool_input.get("path") or tool_input.get("file_path")
+                or tool_input.get("filename") or tool_input.get("notebook_path") or "")
         return path or _truncate(str(tool_input))
-    if tool_name in ("web_search", "search"):
+    if tool_name in ("web_search", "search", "WebSearch"):
         return _truncate(tool_input.get("query", str(tool_input)))
+    if tool_name in ("Grep", "Glob"):
+        return _truncate(tool_input.get("pattern", str(tool_input)))
+    if tool_name in ("web_fetch", "WebFetch"):
+        return _truncate(tool_input.get("url", str(tool_input)))
     return _truncate(str(tool_input))
 
 
 def _files_from_tool(tool_name: str, tool_input: dict) -> list[str]:
-    for key in ("path", "file_path", "filename", "filepath"):
+    for key in ("path", "file_path", "filename", "filepath", "notebook_path"):
         val = tool_input.get(key)
         if val and isinstance(val, str):
             return [val]
@@ -102,6 +122,23 @@ def parse_activity(messages: list[Message]) -> list[ActivityEvent]:
                     detail=reasoning,
                 ))
 
+            # Visible text comes BEFORE the tool calls: the model streams its
+            # message ("let me edit X") and only then invokes the tool — the same
+            # order the live feed shows (onLive flushes streamed text on
+            # tool_start). Emitting tool calls first (the old order) meant a reload
+            # reordered them, so the message's real recorded time landed *after*
+            # the tool it actually preceded, looking out of sync. Emit text first.
+            if msg.content and msg.content.strip() and len(msg.content.strip()) > MIN_MESSAGE_LEN:
+                text = msg.content.strip()
+                is_compression = any(kw in text.lower() for kw in ("compressing", "context compressed", "summarizing context"))
+                events.append(ActivityEvent(
+                    timestamp=ts,
+                    event_type="compression" if is_compression else "message",
+                    icon="🗜️" if is_compression else "🤖",
+                    title="Context compressed" if is_compression else "Agent",
+                    detail=_truncate(text, 300) if is_compression else _clean(text),
+                ))
+
             for tc in msg.tool_calls:
                 if tc.get("type") != "function":
                     continue
@@ -125,17 +162,6 @@ def parse_activity(messages: list[Message]) -> list[ActivityEvent]:
                     detail=_tool_detail(tool_name, tool_input),
                     tool_name=tool_name,
                     files_touched=files,
-                ))
-
-            if msg.content and msg.content.strip() and len(msg.content.strip()) > 5:
-                text = msg.content.strip()
-                is_compression = any(kw in text.lower() for kw in ("compressing", "context compressed", "summarizing context"))
-                events.append(ActivityEvent(
-                    timestamp=ts,
-                    event_type="compression" if is_compression else "message",
-                    icon="🗜️" if is_compression else "🤖",
-                    title="Context compressed" if is_compression else "Agent",
-                    detail=_truncate(text, 300) if is_compression else _clean(text),
                 ))
 
         # ── Tool result ───────────────────────────────────────────────────────

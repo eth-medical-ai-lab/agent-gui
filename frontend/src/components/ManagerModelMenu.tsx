@@ -41,7 +41,11 @@ export function ManagerModelMenu({ chrome, agents }: { chrome: SceneFloorChrome;
   }
 
   const rect = open ? btnRef.current?.getBoundingClientRect() : undefined;
-  const selectable = agents.filter((a) => a.available !== false);
+  // The Claude Agent SDK isn't an LLM endpoint (it resolves models itself — no
+  // base_url to POST the manager's aux calls to), so it can't run the manager.
+  const selectable = agents.filter(
+    (a) => a.available !== false && a.base_url !== "claude-agent-sdk",
+  );
 
   return (
     <>

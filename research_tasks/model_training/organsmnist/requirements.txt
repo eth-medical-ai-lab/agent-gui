@@ -1,0 +1,14 @@
+# Dependencies for the organsmnist task. No conda required:
+#
+#   pip install -r requirements.txt
+#
+# This installs a default (often CPU) build of PyTorch. For a CUDA build matched
+# to your machine, follow https://pytorch.org/get-started/locally/ instead, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#
+# The frozen harness (eval/submit/train/plot_curves) needs only the four below.
+# Add whatever your own model + interpretability code need (e.g. `timm`).
+torch>=2.0
+numpy
+scikit-learn
+matplotlib

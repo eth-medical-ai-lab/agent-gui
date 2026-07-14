@@ -115,6 +115,9 @@ interface Props {
   onSelect: () => void;
   onFocus?: () => void;
   onOpen?: () => void;
+  /** Fired whenever the panel expands/collapses, so the parent can keep the
+   *  desk's hovering agent visible for as long as its panel is open. */
+  onOpenChange?: (open: boolean) => void;
   deskFocused?: boolean;
   onClose: () => void;
   /** Fired once after autoExpand opens the panel (so the parent can clear justStartedId). */
@@ -169,21 +172,6 @@ function elapsedLabel(session: Session): string {
 function stripAnsi(s: string): string {
   return s.replace(/\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
 }
-
-function countOccurrences(text: string, q: string): number {
-  if (!q) return 0;
-  const t = text.toLowerCase(), ql = q.toLowerCase();
-  let n = 0, i = t.indexOf(ql);
-  while (i !== -1) { n++; i = t.indexOf(ql, i + ql.length); }
-  return n;
-}
-
-// Highlight registry helpers (CSS Custom Highlight API). No-op where unsupported.
-const _cssHL = (): { set: (k: string, h: unknown) => void; delete: (k: string) => void } | null =>
-  (typeof CSS !== "undefined" && (CSS as unknown as { highlights?: unknown }).highlights)
-    ? (CSS as unknown as { highlights: { set: (k: string, h: unknown) => void; delete: (k: string) => void } }).highlights
-    : null;
-const _clearFindHL = () => { const h = _cssHL(); if (h) { h.delete("deskfind"); h.delete("deskfind-cur"); } };
 
 // Apply terminal carriage-return semantics: progress bars (e.g. dataset/pip
 // downloads) emit "0.3%\r0.7%\r…" expecting each value to overwrite the line in
@@ -619,7 +607,7 @@ function DeskHistoryView({ history }: { history: DeskHistory | null }) {
   );
 }
 
-export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExpand, openAnchor, workspacePath, taskContent, taskImages, verbose = true, reasoningEffort, apiMode, onPreview, panelZIndex, onPanelActivate, onSelect, onFocus, onOpen, deskFocused, onClose, onAutoExpanded, onActivity, onAskManager, onInterrupt, profileLabel, profileColor, profileModel }: Props) {
+export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExpand, openAnchor, workspacePath, taskContent, taskImages, verbose = true, reasoningEffort, apiMode, onPreview, panelZIndex, onPanelActivate, onSelect, onFocus, onOpen, onOpenChange, deskFocused, onClose, onAutoExpanded, onActivity, onAskManager, onInterrupt, profileLabel, profileColor, profileModel }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<DeskTab>("activity");
   const [consoleView, setConsoleView] = useState<ConsoleView>("debug");
@@ -644,12 +632,6 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
   const [sending, setSending] = useState(false);
   const [termLines, setTermLines] = useState<string[]>([]);
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
-  // In-desk find (Ctrl/⌘-F): highlight matches + Enter/Shift-Enter click-through.
-  const [findOpen, setFindOpen] = useState(false);
-  const [findQuery, setFindQuery] = useState("");
-  const [findIndex, setFindIndex] = useState(0);   // current hit within the active surface
-  const [findCount, setFindCount] = useState(0);   // hits in the active surface (from the DOM)
-  const findInputRef = useRef<HTMLInputElement>(null);
   const consoleBottomRef = useRef<HTMLDivElement>(null);
   const [liveState, setLiveState] = useState<LiveState>({ streamText: "" });
   useEffect(() => { liveStreamRef.current = liveState.streamText; }, [liveState.streamText]);
@@ -993,104 +975,6 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
     scrollContainerToBottom(container);
   }, [termLines.length, tab, consoleView]);
 
-  // ── In-desk find ──────────────────────────────────────────────────────────
-  // Per-surface hit counts (data-driven, so we can label tabs that aren't
-  // currently rendered). Surfaces: Activity feed, Console (agent), Debug.
-  const findCounts = useMemo(() => {
-    const q = findQuery.trim();
-    if (!q) return { activity: 0, console: 0, debug: 0 };
-    const actText = [
-      taskContent || "",
-      ...activity.map((e) => `${e.title} ${e.detail}`),
-      ...liveEvents.map((e) => `${e.title} ${e.detail}`),
-      ...sentMsgs.map((m) => m.text),
-      ...interruptedReplies.map((m) => m.text),
-    ].join("\n");
-    return {
-      activity: countOccurrences(actText, q),
-      console: countOccurrences(applyCarriageReturns(stripAnsi(consoleLines.join(""))), q),
-      debug: verbose ? countOccurrences(applyCarriageReturns(stripAnsi(termLines.join(""))), q) : 0,
-    };
-  }, [findQuery, activity, liveEvents, sentMsgs, interruptedReplies, taskContent, consoleLines, termLines, verbose]);
-
-  type FindSurface = { key: "activity" | "console" | "debug"; count: number; activate: () => void };
-  const findSurfaces: FindSurface[] = [
-    { key: "activity", count: findCounts.activity, activate: () => { setTab("activity"); setActivityView("feed"); } },
-    { key: "console", count: findCounts.console, activate: () => { setTab("console"); setConsoleView("agent"); } },
-    ...(verbose ? [{ key: "debug" as const, count: findCounts.debug, activate: () => { setTab("console"); setConsoleView("debug"); } }] : []),
-  ];
-  const activeSurfaceKey: FindSurface["key"] =
-    tab === "console" ? (consoleView === "debug" ? "debug" : "console") : "activity";
-
-  // Recompute DOM ranges for the active surface whenever the query, content, or
-  // tab changes; register them as highlights and scroll the current hit in view.
-  useEffect(() => {
-    const root = panelContentRef.current;
-    const q = findQuery.trim();
-    if (!findOpen || !q || !root) { _clearFindHL(); setFindCount(0); return; }
-    const ranges: Range[] = [];
-    const ql = q.toLowerCase();
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node = walker.nextNode();
-    while (node) {
-      const val = (node.nodeValue || "").toLowerCase();
-      let i = val.indexOf(ql);
-      while (i !== -1) {
-        try { const r = document.createRange(); r.setStart(node, i); r.setEnd(node, i + q.length); ranges.push(r); } catch { /* skip */ }
-        i = val.indexOf(ql, i + ql.length);
-      }
-      node = walker.nextNode();
-    }
-    setFindCount(ranges.length);
-    const HL = _cssHL();
-    const W = window as unknown as { Highlight?: new (...r: Range[]) => unknown };
-    if (HL && W.Highlight) {
-      if (ranges.length) HL.set("deskfind", new W.Highlight(...ranges)); else HL.delete("deskfind");
-    }
-    const idx = ranges.length ? ((findIndex % ranges.length) + ranges.length) % ranges.length : 0;
-    const cur = ranges[idx];
-    if (cur) {
-      if (HL && W.Highlight) HL.set("deskfind-cur", new W.Highlight(cur));
-      const hitEl = cur.startContainer.parentElement;
-      const container = panelContentRef.current;
-      if (hitEl instanceof HTMLElement && container) {
-        scrollIntoContainer(container, hitEl, "center");
-      }
-    } else if (HL) HL.delete("deskfind-cur");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findOpen, findQuery, findIndex, tab, activityView, consoleView,
-      activity.length, liveEvents.length, consoleLines.length, termLines.length,
-      sentMsgs.length, interruptedReplies.length]);
-
-  // New query: jump to the first surface that has hits so the first match shows
-  // even if the current tab has none.
-  useEffect(() => {
-    if (!findOpen || !findQuery.trim()) return;
-    setFindIndex(0);
-    const withHits = findSurfaces.filter((s) => s.count > 0);
-    if (withHits.length && !withHits.some((s) => s.key === activeSurfaceKey)) withHits[0].activate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findQuery]);
-
-  useEffect(() => () => _clearFindHL(), []);  // clear highlights on unmount
-
-  const findGo = (dir: 1 | -1) => {
-    const withHits = findSurfaces.filter((s) => s.count > 0);
-    if (!withHits.length) return;
-    const ni = findIndex + dir;
-    if (findCount > 0 && ni >= 0 && ni < findCount) { setFindIndex(ni); return; }  // stay in surface
-    const order = withHits.map((s) => s.key);                                      // cross to next surface
-    const ci = order.indexOf(activeSurfaceKey);
-    const nextKey = ci === -1
-      ? (dir === 1 ? order[0] : order[order.length - 1])
-      : order[((ci + dir) % order.length + order.length) % order.length];
-    const surf = findSurfaces.find((s) => s.key === nextKey)!;
-    surf.activate();
-    setFindIndex(dir === 1 ? 0 : Math.max(0, surf.count - 1));
-  };
-
-  const openFind = () => { setFindOpen(true); setTimeout(() => findInputRef.current?.select(), 0); };
-
   // Keep the Files tab in sync with the workspace: refresh the directory tree as
   // the agent works (activity grows) so newly-created files appear without a manual
   // reopen. Also poll on a short interval while the panel is open, so files written
@@ -1123,6 +1007,13 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
     setLoaded(true);
     onAutoExpanded?.();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Tell the parent when this desk's panel is open, so its agent keeps hovering on
+  // the desk the whole time the panel is up (not just while it's the focused desk).
+  useEffect(() => {
+    onOpenChange?.(expanded);
+  }, [expanded]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => onOpenChange?.(false), []); // report closed on unmount
 
   useEffect(() => {
     if (!expanded) return;
@@ -1393,13 +1284,13 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
       // in the activity feed). Maximize stays on the tab-bar/header and the ⊞ button.
       onDoubleClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "f") {
-          e.preventDefault();
-          openFind();
-          return;
-        }
-        if (e.key === "Escape" && findOpen) { e.preventDefault(); setFindOpen(false); return; }
+        // ⌘F is intentionally NOT intercepted — it falls through to the browser's
+        // native in-page find, which is what searches this desk's content now.
         if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+          // Leave select-all alone inside editable fields (e.g. the chat composer)
+          // — only "select all" the read-only content when focus is there.
+          const t = e.target as HTMLElement | null;
+          if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
           const el = panelContentRef.current;
           if (!el) return;
           e.preventDefault();
@@ -1423,12 +1314,7 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
         title={!isMaximized ? "Drag to move · double-click to maximize" : "Double-click to restore"}
       >
         <div style={{ display: "flex", flex: 1, minWidth: 0, overflowX: "auto" }}>
-        {tabItems.map(({ id, label }) => {
-          const hits = !findOpen ? 0
-            : id === "activity" ? findCounts.activity
-            : id === "console" ? findCounts.console + findCounts.debug
-            : 0;
-          return (
+        {tabItems.map(({ id, label }) => (
           <button
             key={id}
             onClick={(e) => {
@@ -1447,23 +1333,10 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
             }}
           >
             {label}
-            {hits > 0 && (
-              <span style={{
-                marginLeft: 4, fontSize: 9, fontWeight: 700, padding: "0 4px",
-                borderRadius: 7, background: "var(--accent2)", color: "#fff",
-              }}>{hits}</span>
-            )}
           </button>
-          );
-        })}
+        ))}
         </div>
         <div style={{ display: "flex", flexShrink: 0, alignItems: "center", paddingRight: 4 }}>
-        <button
-          onClick={(e) => { e.stopPropagation(); findOpen ? setFindOpen(false) : openFind(); }}
-          onDoubleClick={(e) => e.stopPropagation()}
-          title="Find in desk (⌘F)"
-          style={{ fontSize: 13, color: findOpen ? "var(--accent2)" : "var(--text-dim)", padding: "8px 6px" }}
-        >🔍</button>
         <button
           onClick={(e) => { e.stopPropagation(); toggleMaximized(); }}
           onDoubleClick={(e) => e.stopPropagation()}
@@ -1477,47 +1350,6 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
         >×</button>
         </div>
       </div>
-
-      <style>{`
-        ::highlight(deskfind){ background: rgba(255,213,79,0.40); }
-        ::highlight(deskfind-cur){ background: #ff9800; color: #000; }
-      `}</style>
-
-      {/* Find bar */}
-      {findOpen && (
-        <div style={{
-          display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
-          padding: "5px 8px", borderBottom: "1px solid var(--card-border)", background: "var(--bg)",
-        }}>
-          <input
-            ref={findInputRef}
-            value={findQuery}
-            onChange={(e) => setFindQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") { e.preventDefault(); findGo(e.shiftKey ? -1 : 1); }
-              else if (e.key === "Escape") { e.preventDefault(); setFindOpen(false); }
-            }}
-            placeholder="Find in desk…  (Enter ↓ / Shift+Enter ↑)"
-            autoFocus
-            style={{
-              flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid var(--card-border)",
-              borderRadius: 5, padding: "4px 8px", color: "var(--text)", fontSize: 12, outline: "none",
-            }}
-          />
-          <span style={{ fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap", minWidth: 56, textAlign: "right" }}>
-            {findCount > 0 ? `${(((findIndex % findCount) + findCount) % findCount) + 1}/${findCount} here` : (findQuery.trim() ? "0 here" : "")}
-          </span>
-          {[["↑", -1, "Previous (Shift+Enter)"], ["↓", 1, "Next (Enter)"]].map(([sym, dir, t]) => (
-            <button key={sym as string} title={t as string}
-              onClick={() => findGo(dir as 1 | -1)}
-              style={{ fontSize: 12, color: "var(--text-dim)", padding: "2px 6px", borderRadius: 4, border: "1px solid var(--card-border)", background: "transparent", cursor: "pointer" }}
-            >{sym}</button>
-          ))}
-          <button title="Close (Esc)" onClick={() => setFindOpen(false)}
-            style={{ fontSize: 14, color: "var(--text-dim)", padding: "2px 6px", background: "transparent", cursor: "pointer" }}
-          >×</button>
-        </div>
-      )}
 
       {/* Content */}
       <div ref={panelContentRef} style={{ flex: 1, overflowY: "auto", minHeight: 180 }}>
@@ -1566,6 +1398,12 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
                 taskContent={taskContent}
                 startTime={overviewReady ? overviewDesk!.started_at ?? session.started_at : session.started_at}
                 deskEndTime={overviewReady ? overviewDesk!.last_at ?? undefined : undefined}
+                endTime={!session.is_running ? (() => {
+                  // Finished desk: pin the chart to the run's real end, not now().
+                  const iso = (overviewReady ? overviewDesk!.last_at : null) ?? session.ended_at;
+                  const t = iso ? Date.parse(iso) / 1000 : NaN;
+                  return Number.isFinite(t) ? t : undefined;
+                })() : undefined}
               />
             ) : activityView === "history" ? (
               <DeskHistoryView history={deskHistory} />

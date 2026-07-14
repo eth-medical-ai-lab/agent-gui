@@ -218,12 +218,19 @@ export function buildOverviewTurns(
   }
 
   const now = Date.now() / 1000;
-  const deskEndSec = typeof endTime === "number" ? endTime : tsSec(deskEndTime ?? "");
-  const end = Number.isFinite(deskEndSec)
-    ? Math.max(deskEndSec, now)
-    : Number.isFinite(bounds.max)
-      ? Math.max(bounds.max, now)
-      : now;
+  // A numeric `endTime` is authoritative: the caller says the desk is FINISHED,
+  // so the chart ends at the run's real end. Without it (live desk) the axis
+  // keeps growing to `now` so ongoing work charts. Snapping finished desks to
+  // `now` turned a 40-min run viewed a day later into a "1.1 d span" ending at
+  // today's clock time, its whole tail one collapsed gap.
+  const liveEndSec = tsSec(deskEndTime ?? "");
+  const end = typeof endTime === "number" && Number.isFinite(endTime)
+    ? (Number.isFinite(bounds.max) ? Math.max(endTime, bounds.max) : endTime)
+    : Number.isFinite(liveEndSec)
+      ? Math.max(liveEndSec, now)
+      : Number.isFinite(bounds.max)
+        ? Math.max(bounds.max, now)
+        : now;
   if (out.length) {
     const last = out[out.length - 1];
     last.end = Math.max(last.end, end, last.start + MIN_TURN_SEC);

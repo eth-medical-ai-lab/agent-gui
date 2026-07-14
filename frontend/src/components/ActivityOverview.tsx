@@ -57,6 +57,10 @@ const BAR_PX = 4;
 // timing, so within a turn we model the first (events × this) seconds as active
 // work and the remainder (e.g. waiting for the user to reply) as idle.
 const PER_EVENT_SECS = 1;
+// Compressed-axis width given to a zero-duration event (one that shares its
+// resolved timestamp with its predecessor) so it still registers in the bars
+// and the legend percentages instead of silently vanishing.
+const ZERO_EVENT_COMP_SECS = 0.25;
 // An idle stretch longer than this (e.g. the app being stopped between a previous
 // session and a resume) is collapsed to GAP_COMPRESSED on the axis and shown as a
 // "break", so a long downtime can't bury a prior session's calls under dead time.
@@ -148,6 +152,15 @@ export function ActivityOverview({
           if (len > 0) {
             segs.push({ kind: "active", cat, realStart: prev, realLen: len, compStart: comp, compLen: len, turn });
             comp += len;
+          } else {
+            // Zero-width event — it shares its resolved time with its
+            // predecessor (typical on trustDb desks: every event parsed from
+            // one assistant DB row carries the row's single timestamp). Give
+            // it a sliver of the compressed axis so it still contributes to
+            // the bars and the legend split; dropping it zeroed out whole
+            // categories (a run with 30 messages could read "Generating 0%").
+            segs.push({ kind: "active", cat, realStart: prev, realLen: 0, compStart: comp, compLen: ZERO_EVENT_COMP_SECS, turn });
+            comp += ZERO_EVENT_COMP_SECS;
           }
           prev = t;
         });

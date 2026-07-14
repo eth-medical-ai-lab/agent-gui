@@ -1,9 +1,11 @@
 """Live experiment log + dashboard for the medical_reasoning prompt-engineering run.
 
-Experiment design enforced by run_iter.py:
-  - DEV  (data.jsonl, n=20)      : evaluated EVERY iteration.
-  - TEST (data_test.jsonl, n=100): evaluated every TEST_EVERY=3 dev iterations,
-                                    on every new dev-best, and on the final run.
+Experiment design enforced by run_iter.py + submit.py:
+  - DEV  (data.jsonl, n=20)      : evaluated EVERY iteration (run_iter.py).
+  - TEST (data_test.jsonl, n=100): evaluated exactly TWICE, both sealed
+                                    one-shots via submit.py — the baseline
+                                    prompt before iterating, and the final
+                                    dev-selected prompt at the end.
 
 This module just persists results and (re)builds the dashboard files:
   results/leaderboard.jsonl   append-only run log (one JSON per line)
@@ -24,8 +26,6 @@ LEDGER = RESULTS_DIR / "leaderboard.jsonl"
 SNAPSHOT = RESULTS_DIR / "leaderboard.json"
 STATE = RESULTS_DIR / "state.json"
 INDEX = RESULTS_DIR / "index.html"
-
-TEST_EVERY = 3  # run test set every Nth dev iteration
 
 
 def _now() -> str:
@@ -122,7 +122,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>MedXpertQA · Qwen3.5-27B · Prompt Engineering</h1>
-  <div class="sub">Iterate on <b>dev (n=20)</b>; report <b>test (n=100)</b> every 3rd iter + new dev-best + final. Auto-refresh 5s · <span id="ts" class="muted"></span></div>
+  <div class="sub">Iterate on <b>dev (n=20)</b>; the held-out <b>test (n=100)</b> is scored twice — the sealed baseline &amp; final submissions. Auto-refresh 5s · <span id="ts" class="muted"></span></div>
 
   <div class="cards" id="cards"></div>
 

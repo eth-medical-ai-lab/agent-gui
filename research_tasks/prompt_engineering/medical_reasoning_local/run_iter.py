@@ -1,13 +1,13 @@
-"""Run one prompt-engineering iteration with the enforced dev/test cadence.
+"""Run one DEV prompt-engineering iteration (the held-out test lives in submit.py).
 
-    python run_iter.py <prompt_file> [--name v3] [--final] [--force-test] [--workers 20]
+    python run_iter.py <prompt_file> [--name v3] [--workers 20]
 
-Policy (see results_log.TEST_EVERY):
+Policy:
   - DEV  (data.jsonl, n=20): evaluated EVERY call -> iteration counter += 1.
-  - TEST (data_test.jsonl):  evaluated when ANY of:
-        * this prompt sets a new dev-best accuracy, OR
-        * iteration % TEST_EVERY == 0, OR
-        * --final / --force-test is passed.
+  - TEST (data_test.jsonl, n=100): NEVER scored here. It is scored exactly
+    twice, both sealed one-shots via submit.py — `submit.py --baseline` before
+    iterating, and `submit.py --prompt-file <best>` once at the very end.
+    Iterating against test would defeat the point of a held-out set.
 
 Every run is appended to results/leaderboard.jsonl and the live dashboard
 (results/index.html) is rebuilt.
@@ -24,7 +24,6 @@ import results_log as RL
 
 TASK_DIR = Path(__file__).resolve().parent
 DEV_DATA = TASK_DIR / "data.jsonl"
-TEST_DATA = TASK_DIR / "data_test.jsonl"
 
 
 def main() -> None:
@@ -32,8 +31,6 @@ def main() -> None:
     ap.add_argument("prompt_file")
     ap.add_argument("--name", help="Prompt label (default = file stem).")
     ap.add_argument("--workers", type=int, default=20)
-    ap.add_argument("--final", action="store_true", help="Force a test run + mark final.")
-    ap.add_argument("--force-test", action="store_true", help="Force test regardless of cadence.")
     args = ap.parse_args()
 
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")
@@ -71,30 +68,9 @@ def main() -> None:
                 why = why[:200] + "…"
             print(f"    ✗ {r['id']:<12} gold={r['correct']} pred={r['predicted']}  {why}")
 
-    # --- TEST (by policy) ---
-    triggers = []
-    if is_best:
-        triggers.append("dev_best")
-    if it % RL.TEST_EVERY == 0:
-        triggers.append(f"every_{RL.TEST_EVERY}")
-    if args.force_test:
-        triggers.append("forced")
-    if args.final:
-        triggers.append("final")
-
-    if triggers:
-        if not TEST_DATA.is_file():
-            print(f"  (test skipped: {TEST_DATA.name} not built yet)")
-        else:
-            test = E.evaluate(prompt, workers=args.workers, model=model,
-                              data_path=TEST_DATA, split="test")
-            RL.append_run(iteration=it, prompt_name=name, split="test", result=test,
-                          trigger="+".join(triggers))
-            print(f"[iter {it}] {name}  TEST acc={test['accuracy']:.3f} "
-                  f"({test['n_correct']}/{test['n']})  trigger={'+'.join(triggers)}")
-    else:
-        print(f"[iter {it}] test not due (next at iter "
-              f"{((it//RL.TEST_EVERY)+1)*RL.TEST_EVERY} or on new dev-best)")
+    # --- TEST: never here. Two sealed one-shots live in submit.py. ---
+    print(f"[iter {it}] dev only — the held-out test is scored exactly twice via "
+          f"submit.py (--baseline before iterating; --prompt-file <best> at the end)")
 
     RL.save_state(state)
     print(f"dashboard: {RL.INDEX}")

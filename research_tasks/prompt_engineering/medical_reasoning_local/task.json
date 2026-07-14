@@ -2,8 +2,8 @@
   "id": "medical_reasoning_local",
   "name": "Medical Reasoning (MedXpertQA) — Local Solver",
   "description": "Prompt-engineer the system prompt for a LOCAL solver model (Qwen3.5-27B served on a remote GPU server via SSH tunnel) to answer fixed, seeded MedXpertQA multiple-choice questions. The prompt is optimized iteratively BY HAND: the working agent scores a prompt, reads the per-question failures, revises the system prompt, and re-scores — repeating for many rounds. Distinct from the sibling task that uses an API model as the solver — here the solver is local.",
-  "objective": "Maximize dev accuracy (n=20) by editing only the system prompt; report held-out test accuracy (n=100, selection by dev only).",
-  "solver": "Qwen/Qwen3.5-27B (local vLLM via a host SSH tunnel; reached from the Docker sandbox at http://host.docker.internal:8010/v1 by default — if that port moved, run check_tunnel.py to discover the live one)",
+  "objective": "Editing only the system prompt (a GENERAL reasoning strategy — NOT an answer key hardcoding specific dev answers): seal the baseline's held-out test number first (submit.py --baseline), iterate on dev EXACTLY 20 times (run_iter.py, selection by dev only), then seal the final test number (submit.py --prompt-file <best>) and write RESULTS.md reporting the baseline-vs-final test delta.",
+  "solver": "Qwen/Qwen3.5-27B (local vLLM via a host SSH tunnel; reached from the Docker sandbox at http://host.docker.internal:8111/v1 by default — if that port moved, run check_tunnel.py to discover the live one)",
   "dataset": {
     "source": "TsinghuaC3I/MedXpertQA",
     "config": "Text",
@@ -19,7 +19,16 @@
     "function": "evaluate",
     "signature": "evaluate(prompt: str) -> dict",
     "cli": "python eval_qwen.py --prompt-file <file>",
-    "iterate": "python run_iter.py <file>   # by-hand loop: score dev (+ test on cadence), log the dashboard, print the misses to fix next"
+    "iterate": "python run_iter.py <file>   # by-hand loop: score dev, log the dashboard, print the misses to fix next (dev ONLY)"
+  },
+  "submit": {
+    "module": "submit.py",
+    "cli": "python submit.py --baseline   (before iterating)  |  python submit.py --prompt-file <best>   (after iteration 20)",
+    "split": "test",
+    "one_shot_per_slot": true,
+    "slots": ["baseline", "final"],
+    "lock_file": "submission.json",
+    "output": "aggregate-only (no per-sample log)"
   },
   "baseline_prompt": "baseline_prompt.txt",
   "requirements": "requirements.txt",

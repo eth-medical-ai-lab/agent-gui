@@ -126,11 +126,16 @@ function deskShowsAvatar(
   isPending: boolean,
   isPrimary: boolean,
   executing: boolean,
+  isSelected: boolean,
 ): boolean {
   // Every running desk keeps its avatar; focus moves a second figure to the clicked desk.
   if (executing) return true;
   if (isPrimary) return true;
   if (isPending) return false;
+  // An opened/focused desk hovers its own agent above it, even when the roaming
+  // figure has been pulled away to another (e.g. streaming) desk. Without this the
+  // desk you just opened reads as abandoned — no avatar and no highlight.
+  if (isSelected) return true;
   return false;
 }
 
@@ -590,6 +595,9 @@ export function TeamRow({
   const [agentSay,      setAgentSay]        = useState<string | null>(null);
   const [bedSelected,   setBedSelected]     = useState(false);
   const [bellRinging,   setBellRinging]     = useState(false);
+  // Desks whose panel is currently open — their agent keeps hovering on the desk
+  // the whole time the panel is up, regardless of which desk holds focus.
+  const [openDeskIds,   setOpenDeskIds]     = useState<Set<string>>(() => new Set());
   // Desk whose ⚙ agent-settings panel is open (keyed by desk id), + its anchor.
   const [settingsDesk,  setSettingsDesk]    = useState<{ deskId: string; anchor: HTMLElement } | null>(null);
   const [walk,          setWalk]            = useState<WalkState | null>(null);
@@ -869,14 +877,13 @@ export function TeamRow({
     moveAgentVisuallyRef.current(deskIdx);
   };
 
-  // Idle sleep timer
+  // Idle sleep timer — DISABLED. The bed/bell were removed for the manuscript, so
+  // there's nowhere to sleep; the agent stays awake and visible at its desk instead
+  // of walking off and vanishing after a few idle seconds. (Was: after 15s with no
+  // active session, doGoToSleepRef.current() walked the agent to the bed.)
   useEffect(() => {
     const iv = setInterval(() => {
-      const anyActive = desksRef.current.some(isLiveSession);
-      if (anyActive) { lastServerActivityRef.current = Date.now(); return; }
-      if (sleepPhaseRef.current === "awake" && Date.now() - lastServerActivityRef.current > 15000) {
-        doGoToSleepRef.current();
-      }
+      lastServerActivityRef.current = Date.now();
     }, 1000);
     return () => clearInterval(iv);
   }, []);
@@ -1128,15 +1135,8 @@ export function TeamRow({
                 />
               </div>
             </div>
-            <div style={{
-              display: "flex", alignItems: "flex-start", gap: 6, flexShrink: 0,
-              paddingTop: 2, marginLeft: 32,
-            }}>
-              <Bed isSleeping={sleepPhase === "sleeping"} selected={bedSelected} bedRef={bedRef} onClick={handleBedClick} chrome={chrome} />
-              <div ref={bellRef} style={{ paddingTop: 10 }}>
-                <BellButton onClick={handleBellClick} glowing={bellRinging} />
-              </div>
-            </div>
+            {/* Bed + bell removed — not shown in the manuscript. The idle sleep
+               timer is disabled too, so the agent stays awake at its desk. */}
           </div>
         </div>
 
@@ -1179,9 +1179,13 @@ export function TeamRow({
             // working there, so it must appear on every running task (including when
             // several desks run the same profile). Only the roaming/focus figure is
             // hidden mid-walk (the WalkingAgent animates it), never the working ones.
+            const isDeskSelected = desk.id === selectedDeskId;
+            // An opened panel keeps its desk's agent hovering, even when focus and
+            // the roaming figure have moved elsewhere.
+            const isDeskOpen  = !isPending && openDeskIds.has(desk.id);
             const showAvatar  = sleepPhase === "awake"
-              && deskShowsAvatar(isPending, isPrimary, executing)
-              && (executing || !isWalking);
+              && deskShowsAvatar(isPending, isPrimary, executing, isDeskSelected || isDeskOpen)
+              && (executing || isDeskSelected || isDeskOpen || !isWalking);
             if (showAvatar) {
               lastAvatarVisualRef.current = {
                 agentId: profileVis.agentId,
@@ -1192,7 +1196,6 @@ export function TeamRow({
               };
             }
             const canDrag     = showAvatar && !!session?.agent && !executing;
-            const isDeskSelected = desk.id === selectedDeskId;
             const showBubble  = !isWalking && isPending && isPrimary && !agentSay;
             const bubbleText  = "What would you like me to do?";
             const dropHighlight = desk.id === deskDropHoverId;
@@ -1318,6 +1321,12 @@ export function TeamRow({
                       if (!agentSelected) focusDeskAtIndex(i, desk.id);
                     }}
                     deskFocused={isDeskSelected}
+                    onOpenChange={(open) => setOpenDeskIds((prev) => {
+                      if (prev.has(desk.id) === open) return prev;
+                      const next = new Set(prev);
+                      if (open) next.add(desk.id); else next.delete(desk.id);
+                      return next;
+                    })}
                     onClose={() => onDeskClose(desk.id)}
                     onAutoExpanded={onJustStartedConsumed}
                     onActivity={() => handleDeskActivityRef.current(i)}

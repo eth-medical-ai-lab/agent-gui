@@ -3,20 +3,20 @@
 Same contract as the API sibling task (same fixed samples, same answer
 extraction, same scoring, same result schema) — but the *solver model* is
 Qwen3.5-27B served on a remote GPU server (OpenAI-compatible vLLM), reached over
-an SSH tunnel opened **on the host** (by default on local port 8010):
+an SSH tunnel opened **on the host** (by default on local port 8111):
 
-    ssh -L 8010:127.0.0.1:8111 <user>@<gpu-host>   # host :8010 -> remote vLLM
+    ssh -L 8111:127.0.0.1:8111 <user>@<gpu-host>   # host :8111 -> remote vLLM
 
 This harness runs inside the per-desk Docker sandbox, which cannot see the host's
 loopback. Reach the host's tunnel through Docker's host gateway instead — point
 QWEN_BASE_URL at ``host.docker.internal`` (the default below). If you run the
 harness directly on the host (not in a container), override it with the loopback:
 
-    QWEN_BASE_URL=http://127.0.0.1:8010/v1
+    QWEN_BASE_URL=http://127.0.0.1:8111/v1
 
-The tunnel's port sometimes changes between sessions. If the default 8010 is down,
+The tunnel's port sometimes changes between sessions. If the default 8111 is down,
 run ``python check_tunnel.py`` — it pokes around the likely host:port combos
-(8111, …), prints a live base URL, and you ``export QWEN_BASE_URL`` to that.
+(8010, …), prints a live base URL, and you ``export QWEN_BASE_URL`` to that.
 
 The server is assumed to expose an OpenAI-compatible REST API (vLLM). We talk to
 it with the standard library only (urllib) so nothing has to be pip-installed.
@@ -27,7 +27,7 @@ Usage
     python eval_qwen.py --prompt "You are a careful diagnostician..."
 
 Config via environment (all optional):
-    QWEN_BASE_URL   default http://host.docker.internal:8010/v1 — if that's not
+    QWEN_BASE_URL   default http://host.docker.internal:8111/v1 — if that's not
                     live, run check_tunnel.py to discover the right port.
     QWEN_MODEL      default: auto-detected from GET /v1/models
     QWEN_THINK      "1" to enable Qwen native <think> reasoning, "0" (default) to
@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 # --- Frozen-ish evaluation settings -------------------------------------------
-BASE_URL = os.environ.get("QWEN_BASE_URL", "http://host.docker.internal:8010/v1").rstrip("/")
+BASE_URL = os.environ.get("QWEN_BASE_URL", "http://host.docker.internal:8111/v1").rstrip("/")
 API_KEY = os.environ.get("QWEN_API_KEY", "EMPTY")
 ENV_MODEL = os.environ.get("QWEN_MODEL")  # if unset, auto-detect from /v1/models
 ENABLE_THINKING = os.environ.get("QWEN_THINK", "0") == "1"
@@ -330,8 +330,8 @@ def main() -> None:
     except Exception as exc:
         raise SystemExit(
             f"Could not reach the Qwen server at {BASE_URL}: {exc}\n"
-            "Is the SSH tunnel up on the host (default local port 8010)? "
-            "ssh -L 8010:127.0.0.1:8111 <user>@<gpu-host>\n"
+            "Is the SSH tunnel up on the host (default local port 8111)? "
+            "ssh -L 8111:127.0.0.1:8111 <user>@<gpu-host>\n"
             "If the port moved, run `python check_tunnel.py` to discover the live "
             "endpoint, then `export QWEN_BASE_URL=<it>`. From inside the Docker "
             "sandbox the host is host.docker.internal, not 127.0.0.1."

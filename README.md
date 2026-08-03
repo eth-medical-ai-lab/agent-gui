@@ -4,14 +4,12 @@
 
 > AgentGUI: a human-friendly interface for observing and steering AI agents research team. Currently supporting [Hermes](https://github.com/nousresearch/hermes-agent) agents and (experimental) [Claude Agent](https://code.claude.com/docs/en/agent-sdk/overview).
 
+[![arXiv](https://img.shields.io/badge/arXiv-2607.26300-b31b1b.svg)](https://arxiv.org/abs/2607.26300)
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)
-![Node](https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&logoColor=white)
-![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?logo=fastapi&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-required-2496ED?logo=docker&logoColor=white)
 ![Hermes](https://img.shields.io/badge/hermes--agent-v0.15.1-7C3AED)
 
-Each task runs as an agent sitting at a desk in a scrollable office. Click a desk to watch its live activity feed, file tree, terminal, and full debug message. Redirect and reassign agents mid-task without leaving the UI.
+Each task runs as an agent sitting at a desk in a scrollable office. Click a desk to watch its live activity feed, file tree, terminal, and full debug message. Redirect and reassign agents mid-task without leaving the UI. Read about our preprint [here](https://arxiv.org/abs/2607.26300).
 
 > 🆕 **What's new in v1.1.0:** Claude model (agent SDK & API key for hermes) support, subagent visualization, research task templates, and GPU server support. See [Release Notes](RELEASE_NOTES.md) for the full list.
 
@@ -354,16 +352,16 @@ A few tests import the locally installed Hermes agent (`~/.hermes/hermes-agent`)
 
 ## Citation
 
-If you use AgentGUI in your research, please cite:
+If you use AgentGUI in your research, please cite our [paper preprint](https://arxiv.org/abs/2607.26300):
 
 ```bibtex
-@software{eth_medical_ai_lab_2026_agent_gui,
-  author       = {{ETH Zurich, Medical AI Lab}},
-  title        = {AgentGUI: a human-friendly interface for observing and steering AI agents},
-  year         = {2026},
-  month        = jun,
-  version      = {0.1.0},
-  url          = {https://github.com/eth-medical-ai-lab/agent-gui},
-  license      = {MIT}
+@misc{zhao2026agentguiinterfaceobservingsteering,
+      title={AgentGUI: An Interface for Observing and Steering Long-Running AI Agents},
+      author={Xuan Zhao and Jiwoong Sohn and Qinyue Zheng and Michael Moor},
+      year={2026},
+      eprint={2607.26300},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2607.26300},
 }
 ```

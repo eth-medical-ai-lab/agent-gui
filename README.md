@@ -11,7 +11,12 @@
 
 Each task runs as an agent sitting at a desk in a scrollable office. Click a desk to watch its live activity feed, file tree, terminal, and full debug message. Redirect and reassign agents mid-task without leaving the UI. Read about our preprint [here](https://arxiv.org/abs/2607.26300).
 
-> 🆕 **What's new in v1.1.0:** Claude model (agent SDK & API key for hermes) support, subagent visualization, research task templates, and GPU server support. See [Release Notes](RELEASE_NOTES.md) for the full list.
+## News
+
+- **Sept 2026** — 🎉 AgentGUI accepted to EMNLP 2026 — see you in Budapest!
+- **July 2026** — Preprint released on [arXiv](https://arxiv.org/abs/2607.26300)!
+- **July 2026** — v1.1.0 rollout after Anthropic × ETH Zurich!
+  > 🆕 **What's new in v1.1.0:** Claude model support (agent SDK & API key for Hermes), subagent visualization, research task templates, and GPU server support. See the [Release Notes](RELEASE_NOTES.md) for the full list.
 
 <p align="center">
   <img src="img/agent-gui-demo.gif" alt="Demonstration of the AgentGUI interface" style="width: 99%;">
@@ -136,7 +141,7 @@ echo "BRAVE_SEARCH_API_KEY=<key>" >> ~/.hermes/profiles/<profile>/.env
 ```
 
 ### Finer agent profile control
-The script above installs hermes agent profiles. To customize tools, model, and other config, see [Agent profile customization](DEVELOPER_NOTES.md#agent-profile-customization) in the developer notes.
+The script above installs hermes agent profiles. To customize tools, model, and other config, please refer to [Hermes' guide](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) for managing profiles.
 
 ---
 
@@ -331,6 +336,12 @@ python -m pytest tests/
 A few tests import the locally installed Hermes agent (`~/.hermes/hermes-agent`), so they need the [Hermes prerequisite](#prerequisites) in place.
 
 ---
+
+## Contributing
+
+Contributions are welcome — bug reports, feature ideas, docs, and code. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to set up a dev environment, run the tests,
+and open a pull request.
 
 ---
 

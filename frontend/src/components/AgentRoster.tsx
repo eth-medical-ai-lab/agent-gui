@@ -244,7 +244,7 @@ function EditableHeader({
           autoFocus
           style={{
             fontSize: 12, fontWeight: 700, color: "var(--text)",
-            background: "#0f1626", border: "1px solid #2a3558", borderRadius: 5,
+            background: "var(--field)", border: "1px solid var(--chip-line)", borderRadius: 5,
             padding: "4px 7px",
           }}
         />
@@ -255,7 +255,7 @@ function EditableHeader({
           onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(false); }}
           style={{
             fontSize: 11, color: "var(--text-dim)",
-            background: "#0f1626", border: "1px solid #2a3558", borderRadius: 5,
+            background: "var(--field)", border: "1px solid var(--chip-line)", borderRadius: 5,
             padding: "4px 7px",
           }}
         />
@@ -396,7 +396,7 @@ function CreateSectionBox({ onAdd }: { onAdd: (name: string, blurb: string) => v
         autoFocus
         style={{
           fontSize: 12, fontWeight: 700, color: "var(--text)",
-          background: "#0f1626", border: "1px solid #2a3558", borderRadius: 5, padding: "4px 7px",
+          background: "var(--field)", border: "1px solid var(--chip-line)", borderRadius: 5, padding: "4px 7px",
         }}
       />
       <input
@@ -406,7 +406,7 @@ function CreateSectionBox({ onAdd }: { onAdd: (name: string, blurb: string) => v
         onKeyDown={(e) => { if (e.key === "Enter") add(); if (e.key === "Escape") setOpen(false); }}
         style={{
           fontSize: 11, color: "var(--text-dim)",
-          background: "#0f1626", border: "1px solid #2a3558", borderRadius: 5, padding: "4px 7px",
+          background: "var(--field)", border: "1px solid var(--chip-line)", borderRadius: 5, padding: "4px 7px",
         }}
       />
       <div style={{ display: "flex", gap: 6 }}>

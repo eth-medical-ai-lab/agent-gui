@@ -67,7 +67,7 @@ interface Props {
   onMsgChange?: (msg: string) => void;
 }
 
-const DESK_COLORS = ["#6b4c2a", "#5a3e22", "#7a5530", "#4e3018", "#635028", "#724830"];
+const DESK_COLORS = ["var(--desk-c0)", "var(--desk-c1)", "var(--desk-c2)", "var(--desk-c3)", "var(--desk-c4)", "var(--desk-c5)"];
 
 function Dot({ delay, size = 5 }: { delay: number; size?: number }) {
   return (
@@ -229,7 +229,7 @@ export function PendingTaskDesk({ deskIndex, scene, isActive, dropHighlight, ini
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
           <div style={{
             width: 120, height: 80, margin: "0 auto",
-            background: "#1a1a2e", border: "3px solid #333",
+            background: "var(--monitor)", border: "3px solid var(--monitor-frame)",
             borderRadius: "6px 6px 2px 2px",
             position: "relative", overflow: "hidden",
             display: "flex", flexDirection: "column",
@@ -238,7 +238,7 @@ export function PendingTaskDesk({ deskIndex, scene, isActive, dropHighlight, ini
             {[0.7, 0.85, 0.55, 0.85, 0.4].map((w, i) => (
               <div key={i} style={{
                 height: 4, borderRadius: 2,
-                background: i === 0 ? "var(--accent2)" : "rgba(255,255,255,0.18)",
+                background: i === 0 ? "var(--monitor-line-1)" : "var(--monitor-line)",
                 width: `${w * 100}%`,
                 animation: `penline 1.4s ${i * 0.22}s ease-in-out infinite`,
               }} />
@@ -250,8 +250,8 @@ export function PendingTaskDesk({ deskIndex, scene, isActive, dropHighlight, ini
               animation: "pendot 1.1s ease-in-out infinite",
             }} />
           </div>
-          <div style={{ width: 8, height: 10, background: "#333" }} />
-          <div style={{ width: 40, height: 4, background: "#333", borderRadius: 2, marginTop: -2 }} />
+          <div style={{ width: 8, height: 10, background: "var(--monitor-frame)" }} />
+          <div style={{ width: 40, height: 4, background: "var(--monitor-frame)", borderRadius: 2, marginTop: -2 }} />
           <div style={{
             background: deskColor, height: 18, width: "100%",
             borderRadius: "4px 4px 2px 2px", marginTop: 4,
@@ -261,7 +261,7 @@ export function PendingTaskDesk({ deskIndex, scene, isActive, dropHighlight, ini
             <Dot delay={0} /><Dot delay={0.22} /><Dot delay={0.44} />
           </div>
           <div style={{
-            background: `color-mix(in srgb, ${deskColor} 70%, black)`,
+            background: `color-mix(in srgb, ${deskColor} 70%, var(--desk-shade))`,
             height: 14, width: "100%",
             borderRadius: "2px 2px 6px 6px", boxShadow: "0 4px 8px rgba(0,0,0,0.4)",
           }} />
@@ -322,7 +322,7 @@ export function PendingTaskDesk({ deskIndex, scene, isActive, dropHighlight, ini
             onClick={(e) => e.stopPropagation()}
             style={{
               padding: "8px 10px", borderRadius: 8, fontSize: 11,
-              background: "#0f3048",
+              background: "var(--chip-on)",
               border: "2px dashed var(--accent2)",
               color: "var(--accent2)",
               textAlign: "center", lineHeight: 1.45,
@@ -344,7 +344,7 @@ export function PendingTaskDesk({ deskIndex, scene, isActive, dropHighlight, ini
             style={{
               width: "100%", minHeight: 200,
               background: dragOver ? "rgba(100,160,255,0.08)" : "transparent",
-              border: `1px solid ${dragOver ? "var(--accent2)" : error ? "var(--red)" : isActive ? "var(--accent2)" : "#2a3558"}`,
+              border: `1px solid ${dragOver ? "var(--accent2)" : error ? "var(--red)" : isActive ? "var(--accent2)" : "var(--chip-line)"}`,
               borderRadius: 8, padding: "12px 14px",
               fontSize: 13, lineHeight: 1.6, color: "var(--text)",
               outline: "none", resize: "none", fontFamily: "inherit",

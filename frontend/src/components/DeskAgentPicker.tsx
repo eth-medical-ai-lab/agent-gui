@@ -46,8 +46,8 @@ function ProfileTile({
         width: SLOT_W, padding: "6px 4px 8px", borderRadius: 8,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.35 : 1,
-        background: selected ? "#0f3048" : "#121828",
-        border: `2px solid ${selected ? "var(--accent2)" : "#2a3558"}`,
+        background: selected ? "var(--chip-on)" : "var(--chip)",
+        border: `2px solid ${selected ? "var(--accent2)" : "var(--chip-line)"}`,
         color: "var(--text)",
       }}
     >

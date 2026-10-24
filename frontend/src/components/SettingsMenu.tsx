@@ -3,6 +3,7 @@ import { BELL_SOUNDS, playBell } from "../sounds";
 import { SCENES } from "./SceneBackground";
 import { CODE_THEMES } from "./FilePreview";
 import type { CodeThemeId } from "./FilePreview";
+import { THEMES, type ThemeId } from "../theme";
 
 const MANAGER_SEC_MIN = 10;
 const MANAGER_SEC_MAX = 3600;
@@ -61,6 +62,8 @@ interface Props {
   onManagerIdleGraceChange: (sec: number) => void;
   codeTheme: CodeThemeId;
   onCodeThemeChange: (id: CodeThemeId) => void;
+  theme: ThemeId;
+  onThemeChange: (id: ThemeId) => void;
   dockerPersist: boolean;
   onDockerPersistChange: (v: boolean) => void;
   verbose: boolean;
@@ -72,6 +75,7 @@ export function SettingsMenu({
   managerPatrolIntervalSec, onManagerPatrolIntervalChange,
   managerIdleGraceSec, onManagerIdleGraceChange,
   codeTheme, onCodeThemeChange,
+  theme, onThemeChange,
   dockerPersist, onDockerPersistChange, verbose, onVerboseChange,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -235,6 +239,36 @@ export function SettingsMenu({
             {dockerPersist
               ? "Containers stay warm across desk deletion & restart — remove them with Reset."
               : "Containers are removed when a desk is deleted and when the server stops."}
+          </div>
+
+          <div style={{
+            fontSize: 10, fontWeight: 600, color: "var(--text-dim)",
+            textTransform: "uppercase", letterSpacing: "0.05em", margin: "14px 0 8px",
+          }}>
+            Color scheme
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {THEMES.map((t) => {
+              const active = theme === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => onThemeChange(t.id)}
+                  title={t.hint}
+                  style={{
+                    flex: "1 1 45%", padding: "6px 9px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+                    background: active ? "var(--accent2)" : "rgba(255,255,255,0.04)",
+                    color: active ? "white" : "var(--text)",
+                    border: "1px solid var(--card-border)", textAlign: "left",
+                  }}
+                >
+                  {active ? "✓ " : ""}{t.icon} {t.name}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 9, color: "var(--text-dim)", marginTop: 6, opacity: 0.7 }}>
+            Saved in this browser; the header 🌙/☀️ button flips it too.
           </div>
 
           <div style={{

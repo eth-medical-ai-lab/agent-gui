@@ -55,8 +55,8 @@ export function AgentRosterMenu({
           title={open ? "Close Agent Profiles" : "Agent Profiles — view profiles & drag to desks"}
           style={{
             height: 28, padding: "0 10px",
-            background: open || highlighted ? "#0f3048" : "#121828",
-            border: highlighted ? "2px dashed var(--accent2)" : "1px solid #2a3558",
+            background: open || highlighted ? "var(--chip-on)" : "var(--chip)",
+            border: highlighted ? "2px dashed var(--accent2)" : "1px solid var(--chip-line)",
             borderRadius: 6,
             color: open || highlighted ? "var(--accent2)" : "var(--text-dim)",
             fontSize: 10, fontWeight: 600, cursor: "pointer",
@@ -87,8 +87,8 @@ export function AgentRosterMenu({
               bottom: 0,
               zIndex: 500,
               width: "min(380px, 92vw)",
-              borderLeft: highlighted ? "2px dashed var(--accent2)" : "1px solid #2a3558",
-              background: "#16213e",
+              borderLeft: highlighted ? "2px dashed var(--accent2)" : "1px solid var(--chip-line)",
+              background: "var(--bg2)",
               boxShadow: "-8px 0 32px rgba(0,0,0,0.45)",
               display: "flex",
               flexDirection: "column",

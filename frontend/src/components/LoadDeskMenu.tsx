@@ -86,8 +86,8 @@ export function LoadDeskMenu({ onLoadDesk, onLoadSavedDesk }: Props) {
         title="Load a desk from saved/ or browse for a .tar.gz archive"
         style={{
           height: 28, padding: "0 8px",
-          background: open ? "#1a2840" : "#121828",
-          border: `1px solid ${open ? "var(--accent2)" : "#2a3558"}`,
+          background: open ? "var(--chip-open)" : "var(--chip)",
+          border: `1px solid ${open ? "var(--accent2)" : "var(--chip-line)"}`,
           borderRadius: 6, color: "var(--text-dim)", fontSize: 10, cursor: "pointer",
         }}
       >

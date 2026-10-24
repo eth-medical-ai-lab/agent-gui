@@ -1160,6 +1160,24 @@ def _save_docker_persist() -> None:
 _DOCKER_PERSIST = _load_docker_persist()
 
 
+def _rebind_home_state(home: Path) -> None:
+    """Point the per-office GUI state files at THIS server's Hermes home.
+
+    ``gui_sleeping.json`` (desks sent to sleep) and ``gui_docker_persist.json``
+    (container-reaping policy) were module-level paths hardcoded to ``~/.hermes``,
+    so a partition home served on another port (any other
+    --hermes-home) read and overwrote the default office's state — for the very same
+    session ids in the demo's case. create_app() calls this once it knows ``home``;
+    for the default home the paths are unchanged.
+    """
+    global _SLEEPING_FILE, _DOCKER_PERSIST_FILE, _DOCKER_PERSIST
+    _SLEEPING_FILE = Path(home) / "gui_sleeping.json"
+    _session_sleeping.clear()
+    _load_sleeping()
+    _DOCKER_PERSIST_FILE = Path(home) / "gui_docker_persist.json"
+    _DOCKER_PERSIST = _load_docker_persist()
+
+
 def _is_ollama_url(base_url: str, provider: str = "") -> bool:
     """True when the configured backend is local Ollama."""
     return is_ollama_backend(base_url, provider)
@@ -2828,6 +2846,28 @@ def _remove_desk_container(sid: str) -> int:
     return _remove_containers(ids)
 
 
+def _office_id(home: Path) -> str:
+    """Short, filesystem-free identifier for a Hermes home ("" for the default).
+
+    Used by the frontend to namespace per-office browser state (the workbench
+    layout). The default ``~/.hermes`` maps to "" so existing layouts stay under
+    the historical localStorage key; any other home maps to its directory name
+    without the leading dot (``~/.hermes-lab`` → ``hermes-lab``), falling back
+    to a hash of the full path if that name is empty/unprintable.
+    """
+    try:
+        resolved = Path(home).expanduser().resolve()
+        default = (Path.home() / ".hermes").resolve()
+    except OSError:
+        resolved, default = Path(home), Path.home() / ".hermes"
+    if resolved == default:
+        return ""
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", resolved.name.lstrip(".")).strip("-.")
+    if name:
+        return name
+    return hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:10]
+
+
 def create_app(
     hermes_home: str | None = None,
     hermes_api_url: str = "http://localhost:9119",
@@ -2835,10 +2875,17 @@ def create_app(
     allowed_origins: list[str] | None = None,
     gui_config: GuiConfig | None = None,
     experimental: bool = False,
+    frontend_theme: str = "dark",
+    reap_on_shutdown: bool = True,
 ) -> FastAPI:
     global _db_ref, _home_ref, _gui_cfg
+    # Color scheme for the frontend this server hands out. "light" stamps
+    # data-theme="white" onto the served index.html so the white/red palette in
+    # globals.css activates for this instance only — no separate build needed.
+    frontend_theme = (frontend_theme or "dark").strip().lower()
     cfg = gui_config or load_gui_config(hermes_home)
     home = cfg.hermes_home
+    _rebind_home_state(home)   # per-office sleeping set + Docker persist policy
     _home_ref = home
     _gui_cfg = cfg
     # Experimental/developmental features gate (CLI: --experimental). Currently it
@@ -4411,7 +4458,12 @@ def create_app(
                         pass
         # With persistence off, don't leave hermes-* containers behind when the
         # GUI stops. Workers are down now, so it's safe to remove them all.
-        if not _DOCKER_PERSIST:
+        # reap_on_shutdown is off for a secondary app (--no-docker-reap) that
+        # shares ~/.hermes — its Ctrl+C must not reap the primary app's sandboxes
+        # (reaping isn't scoped per-server; it removes ALL hermes-* containers).
+        if not reap_on_shutdown:
+            print("[shutdown] --no-docker-reap: left hermes-* containers for the other running app.")
+        elif not _DOCKER_PERSIST:
             removed = _remove_containers(_list_hermes_containers())
             if removed:
                 print(f"[shutdown] reaped {removed} hermes-* sandbox container(s) "
@@ -6126,6 +6178,13 @@ def create_app(
             raise HTTPException(500, str(exc)) from exc
         return {"ok": True, "id": aid, "unbound_desks": unbound}
 
+    @app.get("/api/office")
+    def get_office():
+        """Which Hermes home this server serves — tiny and fast (no profile
+        scanning, unlike /api/gui-config), so the frontend can resolve its
+        per-office layout key before the first paint of real desks."""
+        return {"office_id": _office_id(home), "hermes_home": str(home)}
+
     @app.get("/api/gui-config")
     def get_gui_config():
         """Resolved Agent GUI settings (agent profile dir, manager LLM overrides)."""
@@ -6133,6 +6192,12 @@ def create_app(
         global_base, global_model = hermes_model_config(home)
         return {
             "hermes_home": str(home),
+            # Stable short id for THIS office (empty for the default ~/.hermes).
+            # The frontend scopes its localStorage workbench layout by it, so a
+            # partition home served on the usual port (any
+            # other --hermes-home) gets its own layout instead of inheriting
+            # — and polluting — the default office's teams.
+            "office_id": _office_id(home),
             "agent_profiles_dir": str(cfg.agent_profiles_dir),
             "agents": _roster_agents(),
             "prototypes": list_prototypes(cfg.agent_profiles_dir, home),
@@ -6561,6 +6626,16 @@ def create_app(
             index = FRONTEND_DIST / "index.html"
             # no-cache so the browser always revalidates the SPA shell and picks up
             # newly-built (content-hashed) JS/CSS bundles instead of a stale cached one.
+            if frontend_theme == "light":
+                # Stamp data-theme onto <html> so :root[data-theme="white"] in
+                # globals.css takes effect for this instance — same dist, recolored.
+                html = index.read_text(encoding="utf-8")
+                # Look at the <html> tag itself — index.html's inline theme
+                # bootstrap also mentions "data-theme" in its script text.
+                if not re.search(r"<html\b[^>]*\sdata-theme=", html):
+                    html = html.replace("<html", '<html data-theme="white"', 1)
+                return Response(content=html, media_type="text/html",
+                                headers={"Cache-Control": "no-cache"})
             return FileResponse(str(index), headers={"Cache-Control": "no-cache"})
     else:
         @app.get("/")

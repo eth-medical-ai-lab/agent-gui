@@ -80,7 +80,7 @@ export function ManagerModelMenu({ chrome, agents }: { chrome: SceneFloorChrome;
               left: Math.min(rect.left, window.innerWidth - 240),
               top: rect.bottom + 6,
               zIndex: 601, width: 230,
-              background: "#16213e", border: "1px solid #2a3558", borderRadius: 8,
+              background: "var(--bg2)", border: "1px solid var(--chip-line)", borderRadius: 8,
               boxShadow: "0 8px 28px rgba(0,0,0,0.5)", padding: 10,
             }}
           >
@@ -99,7 +99,7 @@ export function ManagerModelMenu({ chrome, agents }: { chrome: SceneFloorChrome;
                 onChange={(e) => choose(e.target.value)}
                 style={{
                   width: "100%", fontSize: 12, color: "var(--text)",
-                  background: "#0f1626", border: "1px solid #2a3558", borderRadius: 5,
+                  background: "var(--field)", border: "1px solid var(--chip-line)", borderRadius: 5,
                   padding: "5px 7px",
                 }}
               >

@@ -9,6 +9,8 @@ import { DeskAgentPicker } from "./components/DeskAgentPicker";
 import { GlobalDefaultPersonaEditor } from "./components/GlobalDefaultPersonaEditor";
 import { FilePreview, DEFAULT_CODE_THEME } from "./components/FilePreview";
 import type { CodeThemeId } from "./components/FilePreview";
+import { useTheme } from "./theme";
+import { WORKBENCH_KEY_V1, WORKBENCH_KEY_V2, getWorkbenchKey, setActiveOfficeId } from "./workbenchKey";
 import { DEFAULT_BELL } from "./sounds";
 import { DEFAULT_SCENE } from "./components/SceneBackground";
 import { buildDeskConfigView, defaultDeskBarConfig, deskIsRunning, findDeskItem, pendingStartParams, resolveDeskBarConfig, type DeskBarConfig, type GlobalHermesConfig } from "./deskConfig";
@@ -66,8 +68,8 @@ async function fetchProfileDefaults(
   };
 }
 
-const WORKBENCH_KEY_V2 = "hermes-workbench-v2";
-const WORKBENCH_KEY_V1 = "hermes-workbench-v1"; // read-only, backward compat
+// Office-layout storage key: scoped per Hermes home (office_id from /api/gui-config)
+// so a partition home served on the usual port doesn't inherit this office's teams.
 
 interface DeskSetupDraft {
   agentId: string;
@@ -85,10 +87,11 @@ interface WorkbenchV2 {
   teams: Array<{ id: string; color: string; name?: string; scene?: string; items: WorkbenchEntry[] }>;
 }
 
-function readWorkbenchV2(): WorkbenchV2 | null {
+function readWorkbenchV2(key: string = WORKBENCH_KEY_V2): WorkbenchV2 | null {
   try {
-    const raw = localStorage.getItem(WORKBENCH_KEY_V2);
+    const raw = localStorage.getItem(key);
     if (raw) return JSON.parse(raw) as WorkbenchV2;
+    if (key !== WORKBENCH_KEY_V2) return null; // non-default office: no legacy layout to inherit
     // Backward compat: V1 was a flat array → wrap as single blue team
     const v1raw = localStorage.getItem(WORKBENCH_KEY_V1);
     if (v1raw) {
@@ -106,6 +109,7 @@ function saveWorkbenchV2(
   pendingTexts: Record<string, string>,
   taskContents: Record<string, string>,
   taskImages: Record<string, { name: string; url: string }[]>,
+  key: string = WORKBENCH_KEY_V2,
 ) {
   try {
     const v2: WorkbenchV2 = {
@@ -126,7 +130,7 @@ function saveWorkbenchV2(
         }),
       })),
     };
-    localStorage.setItem(WORKBENCH_KEY_V2, JSON.stringify(v2));
+    localStorage.setItem(key, JSON.stringify(v2));
   } catch {}
 }
 
@@ -198,6 +202,8 @@ export default function App() {
     try { return (localStorage.getItem("hermes-code-theme") as CodeThemeId) || DEFAULT_CODE_THEME; }
     catch { return DEFAULT_CODE_THEME; }
   });
+  // Office color scheme (dark blue / white & red) — see theme.ts.
+  const [theme, setTheme] = useTheme();
   // Server-side Docker cleanup policy (⚙ → Docker). Loaded from the backend on
   // mount; toggling POSTs back. Default off = reap containers on delete/shutdown.
   const [dockerPersist, setDockerPersist] = useState(false);
@@ -280,16 +286,41 @@ export default function App() {
 
   const sessionsRef = useRef<Session[]>([]);
   const workbenchRestoredRef = useRef(false);
+  // Which office (Hermes home) this page talks to decides the localStorage key
+  // for the layout (see workbenchKey.ts). Resolved from GET /api/office in
+  // parallel with the first session list; on failure the restore is retried on
+  // the next poll instead of silently inheriting the default office's layout.
+  const officeResolvedRef = useRef(false);
+  const officeFailuresRef = useRef(0);
+  const OFFICE_LOOKUP_MAX_FAILURES = 3;
 
   const loadSessions = useCallback(async () => {
     try {
+      const officePromise = (!workbenchRestoredRef.current && !officeResolvedRef.current)
+        ? api.office().then((o) => o.office_id ?? "").catch(() => null)
+        : null;
       const data = await api.sessions.list(50);
       setSessions(data);
       sessionsRef.current = data;
 
       if (!workbenchRestoredRef.current) {
+        if (officePromise) {
+          const officeId = await officePromise;
+          if (officeId !== null) {
+            setActiveOfficeId(officeId);
+            officeResolvedRef.current = true;
+          } else if (++officeFailuresRef.current < OFFICE_LOOKUP_MAX_FAILURES) {
+            // Don't guess the key yet — the poll retries in POLL_INTERVAL ms.
+            setBackendError(null);
+            return;
+          } else {
+            console.warn("[workbench] /api/office unreachable — using the default office layout key");
+            setActiveOfficeId("");
+            officeResolvedRef.current = true;
+          }
+        }
         workbenchRestoredRef.current = true;
-        const saved = readWorkbenchV2();
+        const saved = readWorkbenchV2(getWorkbenchKey());
         if (saved && saved.teams.length > 0) {
           const pendingTextsInit: Record<string, string> = {};
           const taskContentsInit: Record<string, string> = {};
@@ -353,7 +384,13 @@ export default function App() {
         }
         // No saved workbench (or nothing restored): still surface server-side teams
         // (e.g. script-created desks) so they appear in the office on a fresh load.
-        setTeams((prev) => mergeServerTeams(prev, data));
+        // When the server has teams, they ARE the office — drop the empty
+        // placeholder team so a fresh load shows only real desks (add a team with
+        // "+ Team" as usual). With no server teams, keep the placeholder.
+        setTeams((prev) => {
+          const fromServer = mergeServerTeams([], data);
+          return fromServer.length > 0 ? fromServer : mergeServerTeams(prev, data);
+        });
       } else {
         // Normal poll: refresh session data across all teams + merge in any
         // newly-appeared server-side teams (script-created desks).
@@ -411,7 +448,9 @@ export default function App() {
 
   // Persist workbench to localStorage on every change
   useEffect(() => {
-    if (workbenchRestoredRef.current) saveWorkbenchV2(teams, pendingTexts, taskContents, taskImages);
+    if (workbenchRestoredRef.current) {
+      saveWorkbenchV2(teams, pendingTexts, taskContents, taskImages, getWorkbenchKey());
+    }
   }, [teams, pendingTexts, taskContents, taskImages]);
 
   // Load the server's Docker cleanup policy once so the ⚙ toggle reflects it.
@@ -950,6 +989,18 @@ export default function App() {
     ));
   }
 
+  // Reorder team rows in the office (persists via the workbench-save effect).
+  function moveTeam(teamId: string, dir: -1 | 1) {
+    setTeams((prev) => {
+      const i = prev.findIndex((t) => t.id === teamId);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }
+
   function addTeam() {
     const usedColors = teams.map((t) => t.color);
     const nextColor = TEAM_COLORS_ARRAY.find((c) => !usedColors.includes(c))
@@ -1054,8 +1105,10 @@ export default function App() {
       return;
     }
     if (!window.confirm("Clear all desks and remove unused agent containers?")) return;
-    try { localStorage.removeItem(WORKBENCH_KEY_V2); } catch {}
-    try { localStorage.removeItem(WORKBENCH_KEY_V1); } catch {}
+    try { localStorage.removeItem(getWorkbenchKey()); } catch {}
+    if (getWorkbenchKey() === WORKBENCH_KEY_V2) {
+      try { localStorage.removeItem(WORKBENCH_KEY_V1); } catch {}
+    }
     setPendingTexts({});
     setTeams([makeTeam("blue")]);
     try {
@@ -1132,6 +1185,8 @@ export default function App() {
         onLoadSnapshot={handleLoadSnapshot}
         onLoadDesk={handleLoadDesk}
         onLoadSavedDesk={handleLoadSavedDesk}
+        theme={theme}
+        onThemeChange={setTheme}
         codeTheme={codeTheme}
         onCodeThemeChange={(id) => {
           setCodeTheme(id);
@@ -1215,6 +1270,7 @@ export default function App() {
         onAddDesk={addDeskToTeam}
         onAddTeam={addTeam}
         onDeleteTeam={deleteTeam}
+        onMoveTeam={moveTeam}
         onTeamSceneChange={setTeamScene}
         onTeamRename={renameTeam}
         onSessionInterrupt={handleSessionInterrupt}
@@ -1272,7 +1328,7 @@ export default function App() {
           onMouseDown={(e) => { if (e.target === e.currentTarget) setDefaultAgentEditorOpen(false); }}
         >
           <div style={{
-            background: "#16213e", border: "1px solid #2a3558", borderRadius: 10,
+            background: "var(--bg2)", border: "1px solid var(--chip-line)", borderRadius: 10,
             padding: 16, width: "min(520px, 92vw)", maxHeight: "85vh", overflow: "auto",
           }}>
             <GlobalDefaultPersonaEditor

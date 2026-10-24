@@ -35,6 +35,7 @@ interface Props {
   askManagerByTeamId?: Record<string, string | null>;
   onAskManagerDone?: (teamId: string) => void;
   onDeleteTeam?: (teamId: string) => void;
+  onMoveTeam?: (teamId: string, dir: -1 | 1) => void;
   onPreview: (data: FilePreviewData) => void;
   deskPanelZ?: Record<string, number>;
   onDeskPanelActivate?: (deskId: string) => void;
@@ -82,14 +83,14 @@ function WallClock() {
     <div style={{
       position: "sticky", top: 10, right: 16,
       width: 44, height: 44, marginLeft: "auto", marginRight: 16,
-      background: "rgba(15,15,40,0.7)", borderRadius: "50%",
+      background: "var(--clock-face)", borderRadius: "50%",
       border: "1px solid rgba(255,255,255,0.08)",
       zIndex: 20, flexShrink: 0, pointerEvents: "none",
     }}>
       <svg viewBox="0 0 44 44" width="44" height="44">
         {[0,30,60,90,120,150,180,210,240,270,300,330].map(d => (
           <line key={d} x1="22" y1="5" x2="22" y2={d%90===0?8:7}
-            stroke="rgba(255,255,255,0.35)" strokeWidth={d%90===0?1.5:0.8}
+            stroke="var(--clock-tick)" strokeWidth={d%90===0?1.5:0.8}
             transform={`rotate(${d} 22 22)`} />
         ))}
         <line x1="22" y1="22" x2="22" y2="12" stroke="var(--text)" strokeWidth="2.2" strokeLinecap="round" transform={`rotate(${h} 22 22)`} />
@@ -134,7 +135,7 @@ export function Office({
   pendingAssignments, activePendingDeskId, deskDropHoverId, askManagerByTeamId, onAskManagerDone,
   onPreview, onDeskStart, onDeskClose,
   deskPanelZ, onDeskPanelActivate,
-  onAddDesk, onAddTeam, onDeleteTeam, onSessionInterrupt, onAssignAgentToDesk,
+  onAddDesk, onAddTeam, onDeleteTeam, onMoveTeam, onSessionInterrupt, onAssignAgentToDesk,
   onPendingMsgChange, onPendingAssignmentPatch, onActivePendingDeskChange, onDeskFocus, focusedDeskId, selectedDeskId,
   deskConfigsById, onAvatarClick, onDeskAskManager, onAgentDragStart,
   onTeamSceneChange, onTeamRename,
@@ -161,6 +162,8 @@ export function Office({
             teamIndex={idx}
             searchMatchIds={searchMatchIds}
             onDeleteTeam={teams.length > 1 ? () => onDeleteTeam?.(team.id) : undefined}
+            onMoveUp={idx > 0 ? () => onMoveTeam?.(team.id, -1) : undefined}
+            onMoveDown={idx < teams.length - 1 ? () => onMoveTeam?.(team.id, 1) : undefined}
             justStartedId={justStartedId}
             justStartedAnchor={justStartedAnchor}
             onJustStartedConsumed={onJustStartedConsumed}

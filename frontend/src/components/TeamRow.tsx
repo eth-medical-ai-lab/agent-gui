@@ -20,6 +20,7 @@ import { TeamRowPanelContext, TEAM_ROW_HEIGHT } from "../TeamRowPanelContext";
 import { FloorManager } from "./FloorManager";
 import { ManagerModelMenu } from "./ManagerModelMenu";
 import { TeamFileRepo } from "./TeamFileRepo";
+import { WORKBENCH_KEY_V1, WORKBENCH_KEY_V2, getWorkbenchKey } from "../workbenchKey";
 
 // ── Team color palette ──────────────────────────────────────────────────────
 
@@ -487,6 +488,8 @@ export interface TeamRowProps {
   team: Team;
   teamIndex: number;
   onDeleteTeam?: () => void;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
   justStartedId?: string | null;
   justStartedAnchor?: { top: number; left: number } | null;
   onJustStartedConsumed?: () => void;
@@ -541,7 +544,7 @@ export interface TeamRowProps {
 }
 
 export function TeamRow({
-  team, teamIndex, onDeleteTeam,
+  team, teamIndex, onDeleteTeam, onMoveUp, onMoveDown,
   justStartedId, justStartedAnchor, onJustStartedConsumed, workspacePaths, taskContents, taskImages, pendingTexts,
   verbose, reasoningEffort, apiMode, bellSound, scene, onSceneChange, onTeamRename, showManager,
   managerPatrolIntervalSec, managerIdleGraceSec,
@@ -572,7 +575,8 @@ export function TeamRow({
   // Hide desk strip until real sessions load (prevents reload scroll-jump)
   const [desksVisible, setDesksVisible] = useState(() => {
     try {
-      const v2 = localStorage.getItem("hermes-workbench-v2");
+      const key = getWorkbenchKey();   // per-office layout key (App resolves it before restore)
+      const v2 = localStorage.getItem(key);
       if (v2) {
         const data = JSON.parse(v2);
         const saved = data?.teams?.find((t: { id: string }) => t.id === team.id);
@@ -580,9 +584,9 @@ export function TeamRow({
         // an all-pending (empty) team would never reveal its desk strip.
         return !saved?.items?.some((it: { type?: string }) => it.type === "session");
       }
-      // V1 backward compat (team 0 only)
-      if (teamIndex === 0) {
-        const v1 = localStorage.getItem("hermes-workbench-v1");
+      // V1 backward compat (team 0 only, default office only)
+      if (teamIndex === 0 && key === WORKBENCH_KEY_V2) {
+        const v1 = localStorage.getItem(WORKBENCH_KEY_V1);
         return !v1 || JSON.parse(v1).length === 0;
       }
       return true;
@@ -1095,6 +1099,9 @@ export function TeamRow({
                     ))}
                   </select>
                 )}
+                {/* Team reorder ▲/▼ buttons removed (ugly). The move plumbing
+                   (onMoveUp/onMoveDown → App.moveTeam) is kept dormant so it can
+                   be re-exposed in a cleaner form if needed. */}
                 {onDeleteTeam && (
                   <button
                     onClick={() => {

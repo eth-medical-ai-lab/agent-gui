@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:white": "vite --mode white --port 5273",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",

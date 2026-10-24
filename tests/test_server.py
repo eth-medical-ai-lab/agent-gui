@@ -1540,6 +1540,9 @@ async def test_patch_agent_syncs_profile_default_tools(tmp_path: Path):
     @dataclass
     class _FakeSession:
         id: str
+        # _enrich_session → db.get_desk_time_bounds reads these on the DB-less path.
+        started_at: str | None = None
+        ended_at: str | None = None
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         with mock.patch.object(HermesDB, "get_session", return_value=_FakeSession(sid)):

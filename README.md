@@ -254,7 +254,14 @@ For all `./start.sh`, `bash dev.sh`, or `python -m agent_gui` — the server run
 --no-open                     Don't auto-open the browser
 --workspace-root ~/workspace  Where per-desk working dirs are created
 --experimental                Enable developmental features (Claude Agent SDK agent); off by default
+--front-end dark|light        Default color scheme for this instance (the in-app 🌙/☀️ toggle overrides it)
+--no-docker-reap              Leave hermes-* sandbox containers running on shutdown (for a second instance sharing ~/.hermes)
 ```
+
+**Color scheme.** The office comes in two schemes — *dark blue* (default) and *white & red*. Flip
+between them with the 🌙/☀️ button in the header or under **⚙ → Color scheme**; the choice is
+saved in the browser. `?theme=white` / `?theme=dark` on the URL forces a scheme for one load.
+
 
 ---
 
@@ -268,6 +275,7 @@ For all `./start.sh`, `bash dev.sh`, or `python -m agent_gui` — the server run
 | **Bed**                | Awake → interrupt + sleep. Sleeping → click a desk to reassign the agent                                 |
 | **Bell**               | Wake the agent to the last active desk                                                                   |
 | **👥 Agent Profiles**  | Side panel of all profiles — drag an avatar onto a desk to assign/resume, or onto a section to organize  |
+| **🌙 / ☀️**            | Switch the whole office between the dark-blue and white-&-red color schemes (also ⚙ → Color scheme)     |
 
 > Hard-refresh (Cmd+Shift+R) after updating to pick up new JS bundles.
 

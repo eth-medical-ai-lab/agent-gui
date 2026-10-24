@@ -48,7 +48,7 @@ export function DeskAgentCustomizeModal({
 
   const btnStyle: React.CSSProperties = {
     padding: "3px 7px", fontSize: 9, fontWeight: 500, cursor: "pointer",
-    borderRadius: 5, border: "1px solid #2a3558",
+    borderRadius: 5, border: "1px solid var(--chip-line)",
   };
 
   return (
@@ -72,8 +72,8 @@ export function DeskAgentCustomizeModal({
                 onClick={() => setTab(id)}
                 style={{
                   padding: "6px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600,
-                  cursor: "pointer", border: "1px solid #2a3558",
-                  background: tab === id ? "#0f3048" : "#121828",
+                  cursor: "pointer", border: "1px solid var(--chip-line)",
+                  background: tab === id ? "var(--chip-on)" : "var(--chip)",
                   color: tab === id ? "var(--accent2)" : "var(--text-dim)",
                   textTransform: "capitalize",
                 }}
@@ -93,7 +93,7 @@ export function DeskAgentCustomizeModal({
               title={verbose ? "High verbosity" : "Low verbosity"}
               style={{
                 display: "flex", alignItems: "center", gap: 5, cursor: "pointer", userSelect: "none",
-                padding: "4px 10px", background: "#121828", borderRadius: 6, border: "1px solid #2a3558",
+                padding: "4px 10px", background: "var(--chip)", borderRadius: 6, border: "1px solid var(--chip-line)",
               }}
             >
               <span style={{ fontSize: 10, color: "var(--text-dim)" }}>Verbose</span>
@@ -110,7 +110,7 @@ export function DeskAgentCustomizeModal({
                   onClick={() => onReasoningChange(value)}
                   style={{
                     ...btnStyle,
-                    background: reasoningEffort === value ? "#0f3048" : "#121828",
+                    background: reasoningEffort === value ? "var(--chip-on)" : "var(--chip)",
                     color: reasoningEffort === value ? "var(--accent2)" : "var(--text-dim)",
                   }}
                 >
@@ -173,7 +173,7 @@ export function DeskAgentCustomizeModal({
 
 const sectionStyle: React.CSSProperties = {
   marginBottom: 16, padding: "12px 14px", borderRadius: 8,
-  background: "#0e1424", border: "1px solid #2a3558",
+  background: "var(--field)", border: "1px solid var(--chip-line)",
 };
 
 const sectionTitleStyle: React.CSSProperties = {
@@ -183,7 +183,7 @@ const sectionTitleStyle: React.CSSProperties = {
 
 const selectStyle: React.CSSProperties = {
   fontSize: 12, padding: "6px 10px", borderRadius: 6,
-  background: "#121828", border: "1px solid #2a3558", color: "var(--text)",
+  background: "var(--chip)", border: "1px solid var(--chip-line)", color: "var(--text)",
 };
 
 const ghostBtn: React.CSSProperties = {

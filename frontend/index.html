@@ -5,6 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent GUI</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
+    <!-- Color-scheme bootstrap: set <html data-theme> BEFORE the bundle loads so a
+         saved white/red pick doesn't flash navy on reload. Same precedence as
+         src/theme.ts: ?theme= > localStorage hermes-theme > server stamp > VITE_THEME. -->
+    <script>
+      (function () {
+        try {
+          var h = document.documentElement;
+          var q = new URLSearchParams(location.search).get("theme");
+          var s = null; try { s = localStorage.getItem("hermes-theme"); } catch (e) {}
+          var v = q || s || h.getAttribute("data-theme") || "%VITE_THEME%";
+          if (v === "light") v = "white";
+          if (v === "dark" || v === "white") h.setAttribute("data-theme", v);
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

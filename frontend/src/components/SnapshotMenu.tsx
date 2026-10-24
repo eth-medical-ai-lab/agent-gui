@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { Session, Team } from "../types";
+import { getWorkbenchKey } from "../workbenchKey";
 
 const SNAPSHOTS_KEY = "hermes-snapshots";
 const SNAPSHOT_PREFIX = "hermes-snapshot-";
-const WORKBENCH_KEY_V2 = "hermes-workbench-v2";
+// The layout lives under a per-office key (see workbenchKey.ts) — never hardcode it.
 
 interface SessionSummary {
   id: string;
@@ -75,7 +76,7 @@ export function SnapshotMenu({ teams, sessions, onLoadSnapshot }: Props) {
     const name = nameInput.trim();
     if (!name) return;
     try {
-      const current = localStorage.getItem(WORKBENCH_KEY_V2);
+      const current = localStorage.getItem(getWorkbenchKey());
       if (!current) return;
       localStorage.setItem(SNAPSHOT_PREFIX + name, current);
       const index = loadIndex();
@@ -99,7 +100,7 @@ export function SnapshotMenu({ teams, sessions, onLoadSnapshot }: Props) {
     try {
       const raw = localStorage.getItem(SNAPSHOT_PREFIX + name);
       if (!raw) return;
-      localStorage.setItem(WORKBENCH_KEY_V2, raw);
+      localStorage.setItem(getWorkbenchKey(), raw);
       setOpen(false);
       onLoadSnapshot();
     } catch {}

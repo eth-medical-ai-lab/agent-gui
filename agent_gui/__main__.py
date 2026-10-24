@@ -62,6 +62,8 @@ def _serve(args) -> None:
         allowed_origins=allowed_origins,
         gui_config=gui_config,
         experimental=args.experimental,
+        frontend_theme=args.front_end,
+        reap_on_shutdown=not args.no_docker_reap,
     )
     if not args.no_open:
         def _open() -> None:
@@ -69,6 +71,10 @@ def _serve(args) -> None:
             webbrowser.open(f"http://localhost:{args.port}")
         threading.Thread(target=_open, daemon=True).start()
     print(f"Agent GUI running at http://localhost:{args.port}  (Ctrl+C to stop)")
+    if args.front_end == "light":
+        print("🎨 Frontend theme: light (white/red demo scheme) — this instance only.")
+    if args.no_docker_reap:
+        print("🐳 --no-docker-reap: hermes-* containers left running on shutdown (won't touch the other app).")
     if args.experimental:
         print("🧪 Experimental features ON — the Claude Code SDK agent is available in the roster.")
     if args.host not in ("127.0.0.1", "localhost"):
@@ -112,6 +118,15 @@ def main():
                         help="Enable experimental/developmental features (currently the Claude "
                              "Code SDK agent). Off by default; the released app exposes only the "
                              "stable Hermes agents.")
+    parser.add_argument("--front-end", choices=["dark", "light"], default="dark",
+                        help="Frontend color scheme (default: dark). 'light' serves the white/red "
+                             "demo theme for THIS instance only (data-theme injected into the served "
+                             "index.html — no separate build). Pair with a second --port to run a "
+                             "screenshot app alongside the normal dark one.")
+    parser.add_argument("--no-docker-reap", action="store_true",
+                        help="Don't reap hermes-* Docker containers on shutdown. Use for a second "
+                             "app that shares ~/.hermes so its Ctrl+C doesn't kill the primary "
+                             "app's sandbox containers.")
     args = parser.parse_args()
 
     # If a server is already listening on the port, don't start a second one —

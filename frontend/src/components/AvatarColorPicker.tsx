@@ -34,8 +34,8 @@ export function AvatarColorPicker({ value, fallbackColor, onChange, compact }: P
                   display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
                   padding: "4px 2px 2px", width: 52,
                   borderRadius: 8, cursor: "pointer",
-                  border: sel ? "1px solid var(--accent2)" : "1px solid #2a3558",
-                  background: sel ? "rgba(100,200,255,0.10)" : "#0f1626",
+                  border: sel ? "1px solid var(--accent2)" : "1px solid var(--chip-line)",
+                  background: sel ? "rgba(100,200,255,0.10)" : "var(--field)",
                 }}
               >
                 <div style={{ height: 34, display: "flex", alignItems: "flex-end" }}>
@@ -78,7 +78,7 @@ export function AvatarColorPicker({ value, fallbackColor, onChange, compact }: P
           style={{
             alignSelf: "flex-start", padding: "3px 8px", fontSize: 10,
             borderRadius: 5, cursor: "pointer", color: "var(--text-dim)",
-            background: "transparent", border: "1px solid #2a3558",
+            background: "transparent", border: "1px solid var(--chip-line)",
           }}
         >
           Reset to default

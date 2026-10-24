@@ -8,14 +8,14 @@ export const modalOverlayStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   padding: 16,
-  background: "#080810",
+  background: "var(--overlay)",
 };
 
 /** Opaque modal shell — avoids background bleed-through. */
 export const modalPanelStyle: React.CSSProperties = {
-  background: "#16213e",
+  background: "var(--bg2)",
   borderRadius: 12,
-  border: "1px solid #2a3558",
+  border: "1px solid var(--chip-line)",
   boxShadow: "0 12px 40px rgba(0, 0, 0, 0.65)",
 };
 
@@ -23,8 +23,8 @@ export const sectionBoxStyle: React.CSSProperties = {
   marginBottom: 12,
   padding: "12px 14px",
   borderRadius: 8,
-  background: "#121828",
-  border: "1px solid #2a3558",
+  background: "var(--chip)",
+  border: "1px solid var(--chip-line)",
 };
 
 export const sectionTitleStyle: React.CSSProperties = {
@@ -47,8 +47,8 @@ export const personaTextStyle: React.CSSProperties = {
   overflowY: "auto",
   padding: "10px 12px",
   borderRadius: 6,
-  background: "#0d1220",
-  border: "1px solid #243050",
+  background: "var(--field)",
+  border: "1px solid var(--chip-line)",
 };
 
 /** Taller persona column for wide modals (SOUL | MEMORY side-by-side). */
@@ -77,8 +77,8 @@ export const inputSolidStyle: React.CSSProperties = {
   boxSizing: "border-box",
   padding: "8px 10px",
   borderRadius: 6,
-  border: "1px solid #2a3558",
-  background: "#0d1220",
+  border: "1px solid var(--chip-line)",
+  background: "var(--field)",
   color: "var(--text)",
   fontSize: 12,
 };
@@ -88,9 +88,9 @@ export function toolChipStyle(on: boolean): React.CSSProperties {
     fontSize: 10,
     padding: "3px 8px",
     borderRadius: 5,
-    background: on ? "#1a3d2a" : "#1a2030",
-    color: on ? "#a8e6b0" : "#6a7090",
-    border: `1px solid ${on ? "#3d8f55" : "#2a3558"}`,
+    background: on ? "var(--chip-good)" : "var(--chip-off)",
+    color: on ? "var(--chip-good-fg)" : "var(--text-dim)",
+    border: `1px solid ${on ? "var(--chip-good-line)" : "var(--chip-line)"}`,
     fontWeight: on ? 600 : 400,
   };
 }
@@ -100,9 +100,9 @@ export function skillChipStyle(hasSkills: boolean): React.CSSProperties {
     fontSize: 10,
     padding: "4px 9px",
     borderRadius: 5,
-    background: hasSkills ? "#1a3d2a" : "#1a2030",
-    color: hasSkills ? "#a8e6b0" : "#5a6080",
-    border: `1px solid ${hasSkills ? "#3d8f55" : "#2a3558"}`,
+    background: hasSkills ? "var(--chip-good)" : "var(--chip-off)",
+    color: hasSkills ? "var(--chip-good-fg)" : "var(--text-dim)",
+    border: `1px solid ${hasSkills ? "var(--chip-good-line)" : "var(--chip-line)"}`,
     fontWeight: hasSkills ? 600 : 400,
   };
 }
@@ -115,8 +115,8 @@ export function presetTabStyle(active: boolean): React.CSSProperties {
     fontWeight: 600,
     cursor: "pointer",
     textTransform: "capitalize",
-    border: active ? "1px solid var(--accent2)" : "1px solid #2a3558",
-    background: active ? "#0f3048" : "#1a2030",
+    border: active ? "1px solid var(--accent2)" : "1px solid var(--chip-line)",
+    background: active ? "var(--chip-on)" : "var(--chip-off)",
     color: active ? "var(--accent2)" : "var(--text-dim)",
   };
 }

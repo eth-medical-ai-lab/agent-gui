@@ -345,8 +345,12 @@ export const api = {
       post<{ ok: boolean; registered: number }>(
         `/teams/${encodeURIComponent(teamId)}/register`, { session_ids: sessionIds }),
   },
+  /** Which Hermes home this server serves; office_id is "" for the default ~/.hermes. */
+  office: () => get<{ office_id: string; hermes_home: string }>("/office"),
   guiConfig: () =>
     get<{
+      hermes_home?: string;
+      office_id?: string;          // "" for the default ~/.hermes; scopes the workbench layout
       agent_profiles_dir: string;
       desk_default_model: string | null;
       agents: AgentProfile[];

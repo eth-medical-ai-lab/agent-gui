@@ -173,12 +173,12 @@ const fieldLabelStyle: React.CSSProperties = {
 const personaTextareaStyle: React.CSSProperties = {
   width: "100%", minHeight: 160, resize: "vertical",
   fontSize: 12, lineHeight: 1.45, padding: "8px 10px",
-  background: "#121828", border: "1px solid #2a3558", borderRadius: 6,
+  background: "var(--chip)", border: "1px solid var(--chip-line)", borderRadius: 6,
   color: "var(--text)", fontFamily: "inherit",
 };
 
 const ghostBtn: React.CSSProperties = {
-  background: "transparent", border: "1px solid #2a3558", borderRadius: 6,
+  background: "transparent", border: "1px solid var(--chip-line)", borderRadius: 6,
   color: "var(--text-dim)", cursor: "pointer", fontSize: 12, padding: "6px 12px",
 };
 

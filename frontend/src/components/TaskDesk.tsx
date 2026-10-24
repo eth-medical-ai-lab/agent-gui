@@ -1187,7 +1187,7 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
     setIsMaximized((m) => !m);
   }
 
-  const deskColors = ["#6b4c2a", "#5a3e22", "#7a5530", "#4e3018", "#635028", "#724830"];
+  const deskColors = ["var(--desk-c0)", "var(--desk-c1)", "var(--desk-c2)", "var(--desk-c3)", "var(--desk-c4)", "var(--desk-c5)"];
   const deskColor = deskColors[index % deskColors.length];
   const deskTitle = deskDisplayTitle(session.title, session.title_summary, taskContent);
 
@@ -1473,12 +1473,12 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
               <div style={{
                 fontFamily: "monospace", fontSize: 11, lineHeight: 1.6,
                 padding: "8px 10px", whiteSpace: "pre-wrap", wordBreak: "break-all",
-                color: "#d4d4d4", background: "#0d0d14", minHeight: 200,
+                color: "var(--term-fg)", background: "var(--term-bg)", minHeight: 200,
               }}>
                 {consoleLines.length === 0
                   ? <span style={{ color: "#555" }}>Waiting for commands…{"\n"}(output appears here when the agent runs terminal/execute_code commands)</span>
                   : <span dangerouslySetInnerHTML={{ __html: escapeHtml(applyCarriageReturns(stripAnsi(consoleLines.join(""))))
-                      .replace(/\$ (.+)/g, '<span style="color:#4ec9b0">$ <span style="color:#9cdcfe">$1</span></span>') }} />
+                      .replace(/\$ (.+)/g, '<span style="color:var(--term-prompt)">$ <span style="color:var(--term-cmd)">$1</span></span>') }} />
                 }
                 <div ref={consoleBottomRef} />
               </div>
@@ -1486,7 +1486,7 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
               <div style={{
                 fontFamily: "monospace", fontSize: 11, lineHeight: 1.5,
                 padding: "8px 10px", whiteSpace: "pre-wrap", wordBreak: "break-all",
-                color: "#a0ffa0", background: "#080810", minHeight: 200,
+                color: "var(--dbg-fg)", background: "var(--dbg-bg)", minHeight: 200,
               }}>
                 {termLines.length === 0
                   ? <span style={{ color: "#555" }}>Waiting for output…</span>
@@ -1693,7 +1693,7 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
           {/* Monitor */}
           <div style={{
             width: 120, height: 80, margin: "0 auto",
-            background: "#1a1a2e", border: "3px solid #333",
+            background: "var(--monitor)", border: "3px solid var(--monitor-frame)",
             borderRadius: "6px 6px 2px 2px",
             position: "relative", display: "flex", alignItems: "center", justifyContent: "center",
             overflow: "hidden",
@@ -1702,7 +1702,7 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
               {[...Array(5)].map((_, i) => (
                 <div key={i} style={{
                   height: 4, margin: "3px 2px",
-                  background: i === 0 ? "var(--accent2)" : "rgba(255,255,255,0.15)",
+                  background: i === 0 ? "var(--monitor-line-1)" : "var(--monitor-line)",
                   borderRadius: 2,
                   width: i === 0 ? "70%" : i === 2 ? "55%" : i === 4 ? "40%" : "85%",
                   animation: isActive && !session.ended_at && session.is_running !== false
@@ -1718,21 +1718,21 @@ export function TaskDesk({ session, scene, isActive, searchMatch, index, autoExp
               boxShadow: session.is_running ? `0 0 6px ${statusColor(session)}` : "none",
             }} />
           </div>
-          <div style={{ width: 8, height: 10, margin: "0 auto", background: "#333" }} />
-          <div style={{ width: 40, height: 4, margin: "0 auto", background: "#333", borderRadius: 2 }} />
+          <div style={{ width: 8, height: 10, margin: "0 auto", background: "var(--monitor-frame)" }} />
+          <div style={{ width: 40, height: 4, margin: "0 auto", background: "var(--monitor-frame)", borderRadius: 2 }} />
           <div style={{
             background: deskColor, height: 18, borderRadius: "4px 4px 2px 2px", marginTop: 4,
             boxShadow: "inset 0 -3px 0 rgba(0,0,0,0.3), inset 0 2px 0 rgba(255,255,255,0.1)",
             display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 8px",
           }}>
             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-              <div style={{ width: 12, height: 10, background: "#4a3a2a", borderRadius: 1, opacity: 0.7 }} />
+              <div style={{ width: 12, height: 10, background: "var(--desk-item)", borderRadius: 1, opacity: 0.7 }} />
               <div style={{ width: 4, height: 8, background: "#e94560", borderRadius: 1, opacity: 0.8 }} />
             </div>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)" }}>{session.message_count} msgs</div>
+            <div style={{ fontSize: 10, color: "var(--desk-label)" }}>{session.message_count} msgs</div>
           </div>
           <div style={{
-            background: `color-mix(in srgb, ${deskColor} 70%, black)`,
+            background: `color-mix(in srgb, ${deskColor} 70%, var(--desk-shade))`,
             height: 14, borderRadius: "2px 2px 6px 6px", boxShadow: "0 4px 8px rgba(0,0,0,0.4)",
           }} />
           <div style={{ marginTop: 6, padding: "4px 6px", textAlign: "center" }}>

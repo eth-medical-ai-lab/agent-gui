@@ -144,7 +144,7 @@ export function DeskContextBar({
         background: useBox
           ? highlighted ? "rgba(100,200,255,0.08)" : "rgba(18,24,40,0.85)"
           : undefined,
-        border: useBox ? `1px solid ${highlighted ? "var(--accent2)" : "#2a3558"}` : undefined,
+        border: useBox ? `1px solid ${highlighted ? "var(--accent2)" : "var(--chip-line)"}` : undefined,
       }}
       onClick={(e) => e.stopPropagation()}
     >
@@ -249,8 +249,8 @@ export function DeskContextBar({
               fontSize: compact ? 9 : 10,
               fontWeight: 600,
               cursor: "pointer",
-              border: "1px solid #2a3558",
-              background: "#121828",
+              border: "1px solid var(--chip-line)",
+              background: "var(--chip)",
               color: "var(--text-dim)",
               flexShrink: 0,
             }}

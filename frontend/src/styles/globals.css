@@ -19,6 +19,100 @@
   --card: rgba(255,255,255,0.04);
   --card-border: rgba(255,255,255,0.08);
   --radius: 8px;
+  /* Formerly hardcoded component colors — dark values unchanged; themed below. */
+  --chip: #121828;
+  --chip-line: #2a3558;
+  --chip-on: #0f3048;
+  --chip-open: #1a2840;
+  --field: #0f1626;
+  --overlay: #080810;
+  --monitor: #1a1a2e;
+  --monitor-frame: #333;
+  --monitor-line-1: var(--accent2);
+  --monitor-line: rgba(255,255,255,0.15);
+  --desk-c0: #6b4c2a;
+  --desk-c1: #5a3e22;
+  --desk-c2: #7a5530;
+  --desk-c3: #4e3018;
+  --desk-c4: #635028;
+  --desk-c5: #724830;
+  --desk-shade: black;
+  --desk-item: #4a3a2a;
+  --desk-label: rgba(255,255,255,0.5);
+  --term-bg: #0d0d14;
+  --term-fg: #d4d4d4;
+  --term-prompt: #4ec9b0;
+  --term-cmd: #9cdcfe;
+  --dbg-bg: #080810;
+  --dbg-fg: #a0ffa0;
+  --clock-face: rgba(15,15,40,0.7);
+  --clock-tick: rgba(255,255,255,0.35);
+  /* Settings/modal chips (tool + skill chips, inactive preset tabs). */
+  --chip-off: #1a2030;
+  --chip-good: #1a3d2a;
+  --chip-good-fg: #a8e6b0;
+  --chip-good-line: #3d8f55;
+}
+
+/* ── White/red demo color scheme ──────────────────────────────────────────────
+   Activated only when <html data-theme="white"> is set (main.tsx, via the
+   `npm run dev:white` build mode or a ?theme=white URL param). Pure recolor of
+   the CSS custom properties — the normal dark theme (:root above) is untouched,
+   and no component markup/behavior changes. Surfaces that use var(--bg)/--floor/
+   --card/--accent/etc. (page background, office floor, desks, panels) flip to a
+   white background with red accents; the handful of components that hardcode
+   hex colors are intentionally left as-is per the "just a color scheme" scope. */
+:root[data-theme="white"] {
+  --bg: #ffffff;
+  --bg2: #fdf2f3;
+  --bg3: #f8e3e5;
+  --floor: #fdf5f5;
+  --floor-line: #f2dcdd;
+  --wall: #fbeef0;
+  --desk-wood: #cc9e6a;
+  --desk-top: #e6c191;
+  --desk-shadow: #b98b52;
+  --accent: #b63e3d;
+  --accent2: #c25b5a;
+  --text: #2a1a1d;
+  --text-dim: #9a7a7e;
+  --green: #2e9e6b;
+  --yellow: #d19a00;
+  --red: #b63e3d;
+  --purple: #8a3ffb;
+  --card: rgba(182,62,61,0.05);
+  --card-border: rgba(182,62,61,0.18);
+  --chip: #ffffff;
+  --chip-line: #f2cccc;
+  --chip-on: #f9e5e5;
+  --chip-open: #fbeeee;
+  --field: #ffffff;
+  --overlay: #fdf5f5;
+  --monitor: #ffffff;
+  --monitor-frame: #e9cfd3;
+  --monitor-line-1: rgba(182,62,61,0.55);
+  --monitor-line: rgba(182,62,61,0.2);
+  --desk-c0: #f1dcc0;
+  --desk-c1: #ecd4b5;
+  --desk-c2: #f3e1c9;
+  --desk-c3: #e9cfae;
+  --desk-c4: #efd9bb;
+  --desk-c5: #eed6b8;
+  --desk-shade: #c49a6c;
+  --desk-item: #c9a27a;
+  --desk-label: rgba(90,60,30,0.6);
+  --term-bg: #fffafa;
+  --term-fg: #1f3b73;
+  --term-prompt: #000000;
+  --term-cmd: #000000;
+  --dbg-bg: #fdf5f5;
+  --dbg-fg: #1f6b45;
+  --clock-face: #ffffff;
+  --clock-tick: rgba(182,62,61,0.45);
+  --chip-off: #f7eeee;
+  --chip-good: #e3f4e9;
+  --chip-good-fg: #1f7a3d;
+  --chip-good-line: #8fcfa5;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -36,7 +130,8 @@ body {
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #6cb6ff; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #8fc9ff; }
 
 button {
   cursor: pointer;

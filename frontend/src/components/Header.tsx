@@ -9,6 +9,7 @@ import { isVllmBackend } from "../backendKind";
 import type { DeskConfigView } from "../deskConfig";
 import type { RosterLayout } from "../rosterLayout";
 import type { AgentProfile, ReasoningEffort, Session, Team, ToolPresetId, ToolsetMeta } from "../types";
+import { THEMES, type ThemeId } from "../theme";
 
 interface Props {
   teams: Team[];
@@ -57,6 +58,8 @@ interface Props {
   onLoadSavedDesk?: (filename: string) => void;
   codeTheme: import("./FilePreview").CodeThemeId;
   onCodeThemeChange: (id: import("./FilePreview").CodeThemeId) => void;
+  theme: ThemeId;
+  onThemeChange: (id: ThemeId) => void;
   dockerPersist: boolean;
   onDockerPersistChange: (v: boolean) => void;
   verbose: boolean;
@@ -77,9 +80,11 @@ export function Header({
   onBellSoundChange, onSceneChange, onShowManagerChange,
   onManagerPatrolIntervalChange, onManagerIdleGraceChange,
   onReset, onLoadSnapshot, onLoadDesk, onLoadSavedDesk, codeTheme, onCodeThemeChange,
+  theme, onThemeChange,
   dockerPersist, onDockerPersistChange, verbose, onVerboseChange,
 }: Props) {
   const [logoOk, setLogoOk] = useState(true);
+  const otherTheme = THEMES.find((t) => t.id !== theme) ?? THEMES[0];
 
   const reasoningDisabled = deskConfig ? isVllmBackend(deskConfig.baseUrl) : true;
   const showReasoning = Boolean(
@@ -100,7 +105,16 @@ export function Header({
       width: "100%",
       boxSizing: "border-box",
     }}>
-      {logoOk
+      {/* full-logo.png has the dark navy backdrop baked in, so the white theme
+          composes the transparent icon + live wordmark instead. */}
+      {theme === "white"
+        ? <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, height: 40 }}>
+            <img src="/favicon.png" alt="" height={36} style={{ display: "block" }} />
+            <span style={{ fontSize: 20, fontWeight: 800, color: "#000", whiteSpace: "nowrap" }}>
+              Agent <span style={{ fontWeight: 400 }}>GUI</span>
+            </span>
+          </div>
+        : logoOk
         ? <img src="/full-logo.png" alt="Agent GUI" height={40}
             style={{ display: "block", flexShrink: 0 }}
             onError={() => setLogoOk(false)} />
@@ -116,7 +130,7 @@ export function Header({
           from the session list, so they're always current. */}
       <div style={{
         display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
-        padding: "3px 8px", background: "#121828", borderRadius: 6, border: "1px solid #2a3558",
+        padding: "3px 8px", background: "var(--chip)", borderRadius: 6, border: "1px solid var(--chip-line)",
       }}>
         <span style={{
           width: 6, height: 6, borderRadius: "50%",
@@ -212,7 +226,7 @@ export function Header({
           title="Reset workbench"
           style={{
             height: 28, padding: "0 8px",
-            background: "#121828", border: "1px solid #2a3558",
+            background: "var(--chip)", border: "1px solid var(--chip-line)",
             borderRadius: 6, color: "var(--text-dim)", fontSize: 10, cursor: "pointer",
           }}
         >
@@ -224,6 +238,22 @@ export function Header({
         )}
 
         <SnapshotMenu teams={teams} sessions={sessions} onLoadSnapshot={onLoadSnapshot} />
+
+        {/* One-click color-scheme toggle (also under ⚙ → Color scheme). */}
+        <button
+          type="button"
+          onClick={() => onThemeChange(otherTheme.id)}
+          title={`Switch to the ${otherTheme.name} scheme`}
+          aria-label={`Switch to the ${otherTheme.name} scheme`}
+          style={{
+            width: 32, height: 32,
+            background: "rgba(255,255,255,0.06)", border: "1px solid var(--card-border)",
+            borderRadius: 6, color: "var(--text)", fontSize: 15,
+            display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+          }}
+        >
+          {otherTheme.icon}
+        </button>
 
         <SettingsMenu
           bellSound={bellSound}
@@ -238,6 +268,8 @@ export function Header({
           onManagerIdleGraceChange={onManagerIdleGraceChange}
           codeTheme={codeTheme}
           onCodeThemeChange={onCodeThemeChange}
+          theme={theme}
+          onThemeChange={onThemeChange}
           dockerPersist={dockerPersist}
           onDockerPersistChange={onDockerPersistChange}
           verbose={verbose}
